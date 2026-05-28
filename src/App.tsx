@@ -1,0 +1,513 @@
+import React, { useState, useEffect } from "react";
+import { CatalogProductCard, CatalogProductDetail, CategoryRef, CatalogSku, FacetsResponse, BreadcrumbItem } from "./types";
+import { SidebarFilters } from "./components/SidebarFilters";
+import { ChannelCard } from "./components/ChannelCard";
+import { ChannelDetailModal } from "./components/ChannelDetailModal";
+import { DevLogDashboard } from "./components/DevLogDashboard";
+import { PythonCodeViewer } from "./components/PythonCodeViewer";
+import { 
+  Users, 
+  Search, 
+  ShoppingCart, 
+  Heart, 
+  Flame, 
+  Clock, 
+  Check, 
+  BookOpen, 
+  Sparkles, 
+  HelpCircle,
+  TrendingUp,
+  SlidersHorizontal,
+  ChevronRight,
+  X
+} from "lucide-react";
+
+const STATIC_CATEGORIES: CategoryRef[] = [
+  { id: "e1010000-e29b-41d4-a716-446655440001", name: "Электроника (Каналы)", parent_id: null, level: 0, path: ["Электроника (Каналы)"] },
+  { id: "e1010000-e29b-41d4-a716-446655440002", name: "Технологии & IT", parent_id: null, level: 0, path: ["Технологии & IT"] },
+  { id: "e1010000-e29b-41d4-a716-446655440003", name: "Искусственный интеллект", parent_id: "e1010000-e29b-41d4-a716-446655440002", level: 1, path: ["Технологии & IT", "Искусственный интеллект"] },
+  { id: "e1010000-e29b-41d4-a716-446655440004", name: "Разработка ПО", parent_id: "e1010000-e29b-41d4-a716-446655440002", level: 1, path: ["Технологии & IT", "Разработка ПО"] },
+  { id: "e1010000-e29b-41d4-a716-446655440005", name: "Бизнес & Финансы", parent_id: null, level: 0, path: ["Бизнес & Финансы"] },
+  { id: "e1010000-e29b-41d4-a716-446655440006", name: "Криптовалюты", parent_id: "e1010000-e29b-41d4-a716-446655440005", level: 1, path: ["Бизнес & Финансы", "Криптовалюты"] },
+  { id: "e1010000-e29b-41d4-a716-446655440007", name: "Развлечения & Юмор", parent_id: null, level: 0, path: ["Развлечения & Юмор"] },
+  { id: "e1010000-e29b-41d4-a716-446655440008", name: "Мемы", parent_id: "e1010000-e29b-41d4-a716-446655440007", level: 1, path: ["Развлечения & Юмор", "Мемы"] },
+  { id: "e1010000-e29b-41d4-a716-446655440009", name: "Образование & Наука", parent_id: null, level: 0, path: ["Образование & Наука"] },
+  { id: "e1010000-e29b-41d4-a716-446655440010", name: "Иностранные языки", parent_id: "e1010000-e29b-41d4-a716-446655440009", level: 1, path: ["Образование & Наука", "Иностранные языки"] }
+];
+
+export default function App() {
+  // Filters & Search states
+  const [categories, setCategories] = useState<CategoryRef[]>(STATIC_CATEGORIES);
+  const [selectedCategoryId, setSelectedCategoryId] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [priceMin, setPriceMin] = useState("");
+  const [priceMax, setPriceMax] = useState("");
+  const [verifiedOnly, setVerifiedOnly] = useState(false);
+  const [sortOption, setSortOption] = useState("popularity");
+
+  // Loaded Catalog states
+  const [products, setProducts] = useState<CatalogProductCard[]>([]);
+  const [totalCount, setTotalCount] = useState(0);
+  const [facets, setFacets] = useState<FacetsResponse | null>(null);
+  const [breadcrumbs, setBreadcrumbs] = useState<BreadcrumbItem[]>([]);
+  
+  // App system states
+  const [loading, setLoading] = useState(true);
+  const [searchError, setSearchError] = useState("");
+  const [selectedProductId, setSelectedProductId] = useState<string | null>(null);
+  const [activeChannelDetail, setActiveChannelDetail] = useState<CatalogProductDetail | null>(null);
+
+  // Simulated Cart and Favorites states
+  const [cart, setCart] = useState<Array<{ sku: CatalogSku; productName: string; quantity: number }>>([]);
+  const [isCartOpen, setIsCartOpen] = useState(false);
+  const [favorites, setFavorites] = useState<string[]>([]);
+  const [checkoutFinished, setCheckoutFinished] = useState(false);
+
+  // Sync Products and Facets on filter updates
+  useEffect(() => {
+    const syncCatalogData = async () => {
+      setLoading(true);
+      
+      // Validation check for search length (B2C-2 search specs: minimum 3 letters)
+      if (searchQuery.length > 0 && searchQuery.length < 3) {
+        setSearchError("Запрос должен содержать минимум 3 символа.");
+        setLoading(false);
+        return;
+      } else {
+        setSearchError("");
+      }
+
+      // Convert prices from user units (rubles) to backend api units (kopecks)
+      const pMinKops = priceMin ? Number(priceMin) * 100 : "";
+      const pMaxKops = priceMax ? Number(priceMax) * 100 : "";
+
+      // Build listing & facets query params
+      const queryParams = new URLSearchParams();
+      if (searchQuery) queryParams.append("q", searchQuery);
+      if (selectedCategoryId) queryParams.append("category_id", selectedCategoryId);
+      if (pMinKops) queryParams.append("price_min", String(pMinKops));
+      if (pMaxKops) queryParams.append("price_max", String(pMaxKops));
+      if (verifiedOnly) queryParams.append("verified", "true");
+      queryParams.append("sort", sortOption);
+
+      try {
+        // 1. Load Products (GET /api/v1/catalog/products)
+        const prodRes = await fetch(`/api/v1/catalog/products?${queryParams.toString()}`);
+        if (prodRes.ok) {
+          const prodData = await prodRes.json();
+          setProducts(prodData.items);
+          setTotalCount(prodData.total_count);
+        }
+
+        // 2. Load dynamic counts facets (GET /api/v1/catalog/facets)
+        const facetRes = await fetch(`/api/v1/catalog/facets?${queryParams.toString()}`);
+        if (facetRes.ok) {
+          const facetData = await facetRes.json();
+          setFacets(facetData);
+        }
+
+        // 3. Resolve active breadcrumbs list locally from STATIC_CATEGORIES
+        if (selectedCategoryId) {
+          const chain: BreadcrumbItem[] = [];
+          let curId: string | null = selectedCategoryId;
+          while (curId) {
+            const cat = STATIC_CATEGORIES.find(c => c.id === curId);
+            if (!cat) break;
+            chain.unshift({
+              id: cat.id,
+              slug: cat.name.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
+              name: cat.name,
+              url: "#",
+              level: 0,
+              is_current: false
+            });
+            curId = cat.parent_id || null;
+          }
+          chain.forEach((item, index) => {
+            item.level = index;
+            item.is_current = (index === chain.length - 1);
+          });
+          setBreadcrumbs(chain);
+        } else {
+          setBreadcrumbs([]);
+        }
+
+      } catch (err) {
+        console.error("Failed syncing catalog data:", err);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    syncCatalogData();
+  }, [selectedCategoryId, searchQuery, priceMin, priceMax, verifiedOnly, sortOption]);
+
+  const handleResetFilters = () => {
+    setSelectedCategoryId(null);
+    setSearchQuery("");
+    setPriceMin("");
+    setPriceMax("");
+    setVerifiedOnly(false);
+    setSortOption("popularity");
+  };
+
+  const handleSelectProduct = async (id: string) => {
+    setSelectedProductId(id);
+    const detail = await handleLoadProductDetail(id);
+    if (detail) {
+      setActiveChannelDetail(detail);
+    }
+  };
+
+  const handleLoadProductDetail = async (id: string): Promise<CatalogProductDetail | null> => {
+    const foundCard = products.find(p => p.id === id);
+    if (foundCard) {
+      // Mock full details using the loaded product card representation safely
+      return {
+        ...foundCard,
+        description: foundCard.slug === "crypto-whale-alerts" 
+          ? "Раздел аналитики криптовалютных рынков и крупных транзакций. Стабильный доход со спансорских постов, высокая вовлеченность трейдеров и крипто-энтузиастов."
+          : foundCard.slug === "it-career-roadmap"
+          ? "Ведущий образовательный ресурс для начинающих программистов. Интегрированная CPA-сеть вакансий и курсов приносит стабильный пассивный доход."
+          : "Premium-канал проверен кураторами платформы NeoMarket. Полный аудит характеристик, проверенный доход и безопасная передача через гаранта.",
+        attributes: {
+          "Subscribers": foundCard.subscribers,
+          "ER": `${foundCard.er}%`,
+          "Verified": foundCard.verified ? "Yes" : "No"
+        },
+        characteristics: [
+          { name: "Тематика", value: foundCard.category?.name || "Медиабизнес" },
+          { name: "Язык аудитории", value: "Русский" },
+          { name: "Вовлеченность (ER)", value: `${foundCard.er}%` }
+        ],
+        skus: [
+          {
+            id: `sku-std-${foundCard.id}`,
+            name: "Полная передача прав (Базовый)",
+            sku_code: `TG-${foundCard.slug.toUpperCase()}-BASE`,
+            price: foundCard.min_price,
+            old_price: foundCard.old_price,
+            available_quantity: 1,
+            attributes: { "Помощь в транзите": "Да", "Обучение": "7 дней" },
+            images: foundCard.images
+          }
+        ]
+      };
+    }
+    return null;
+  };
+
+  const handleAddToCart = (sku: CatalogSku, productName: string) => {
+    setCart((prev) => {
+      const exists = prev.find((item) => item.sku.id === sku.id);
+      if (exists) {
+        return prev.map((item) =>
+          item.sku.id === sku.id ? { ...item, quantity: item.quantity + 1 } : item
+        );
+      }
+      return [...prev, { sku, productName, quantity: 1 }];
+    });
+  };
+
+  const handleRemoveFromCart = (skuId: string) => {
+    setCart((prev) => prev.filter((item) => item.sku.id !== skuId));
+  };
+
+  const handleSimulatedCheckout = () => {
+    setCheckoutFinished(true);
+    setTimeout(() => {
+      setCart([]);
+      setCheckoutFinished(false);
+      setIsCartOpen(false);
+    }, 4000);
+  };
+
+  const cartTotal = cart.reduce((sum, item) => sum + item.sku.price * item.quantity, 0);
+
+  return (
+    <div className="min-h-screen bg-slate-950 text-slate-100 antialiased font-sans">
+      
+      {/* Visual background ambient gradient splashes */}
+      <div className="absolute top-0 left-0 -z-10 h-[500px] w-full bg-radial-at-t from-cyan-500/10 via-slate-950/20 to-transparent" />
+      <div className="absolute top-[20%] right-[10%] -z-10 h-72 w-72 rounded-full bg-purple-500/5 blur-3xl" />
+
+      {/* Modern Header Navigation */}
+      <header className="sticky top-0 z-40 border-b border-slate-800/80 bg-slate-950/85 py-4 shadow-xl backdrop-blur-md">
+        <div className="mx-auto flex max-w-7xl items-center justify-between px-4 sm:px-6">
+          
+          {/* Logo & Platform Name */}
+          <div className="flex items-center gap-2.5">
+            <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-slate-900 border border-slate-800/80 text-white shadow-md shadow-cyan-500/5">
+              <Sparkles className="h-5 w-5 text-cyan-400 stroke-2" />
+            </div>
+            <div>
+              <span className="font-sans text-base font-black tracking-tight text-white uppercase">
+                NeoMarket
+              </span>
+              <span className="block text-[10px] font-medium text-slate-400 mt-0.5">Маркетплейс Telegram каналов</span>
+            </div>
+          </div>
+
+          {/* Cart & Status Ribbon */}
+          <div className="flex items-center gap-4">
+            <button
+              onClick={() => setIsCartOpen(true)}
+              className="relative flex h-10 w-10 items-center justify-center rounded-xl bg-slate-900 hover:bg-slate-850 border border-slate-800 transition-colors"
+            >
+              <ShoppingCart className="h-4.5 w-4.5 text-slate-200" />
+              {cart.length > 0 && (
+                <span className="absolute -top-1.5 -right-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-cyan-500 text-[10px] font-black font-mono text-slate-950 animate-pulse">
+                  {cart.length}
+                </span>
+              )}
+            </button>
+          </div>
+
+        </div>
+      </header>
+
+      {/* App Body Wrapper */}
+      <main className="mx-auto mt-8 max-w-7xl px-4 sm:px-6">
+
+        {/* Catalog Tab View */}
+        <div className="grid grid-cols-1 gap-8 lg:grid-cols-4">
+            
+            {/* Left Hand: Filter Columns */}
+            <div className="lg:col-span-1 space-y-6">
+              <SidebarFilters
+                categories={categories}
+                selectedCategoryId={selectedCategoryId}
+                onSelectCategory={setSelectedCategoryId}
+                priceMin={priceMin}
+                priceMax={priceMax}
+                setPriceMin={setPriceMin}
+                setPriceMax={setPriceMax}
+                verifiedOnly={verifiedOnly}
+                setVerifiedOnly={setVerifiedOnly}
+                facets={facets}
+                onReset={handleResetFilters}
+              />
+            </div>
+
+            {/* Right Hand: Catalog Grid, Search, and Tools */}
+            <div className="lg:col-span-3 space-y-6">
+              
+              {/* Header Promo Banner */}
+              <div className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-slate-900 via-slate-950 to-slate-950 p-6 md:p-8 text-white border border-slate-800 shadow-xl">
+                <div className="absolute top-0 right-0 h-full w-48 bg-radial-at-t from-cyan-500/15 via-transparent to-transparent pointer-events-none" />
+                <div className="max-w-xl">
+                  <span className="text-[10px] font-bold uppercase tracking-widest text-cyan-400 bg-cyan-950/80 px-2 py-1 rounded inline-block border border-cyan-900/50">Портал Покупки Каналов</span>
+                  <h1 className="mt-3.5 font-sans text-xl md:text-2xl font-black text-white leading-tight">
+                    Инвестируйте в готовый медиабизнес безопасно
+                  </h1>
+                  <p className="mt-2 text-xs text-slate-350 leading-relaxed">
+                    Все выставленные Telegram-каналы прошли полную модерацию и аудит вовлеченности (ER) нашими кураторами. Простая сделка "под ключ" через Безопасный Гарант.
+                  </p>
+                </div>
+              </div>
+
+              {/* Dynamic Search Box & Sort Selection */}
+              <div className="flex flex-col gap-3 rounded-2xl border border-slate-800 bg-slate-900/40 p-4 shadow-lg glass sm:flex-row sm:items-center sm:justify-between">
+                
+                {/* Text search form */}
+                <div className="relative flex-1 max-w-md">
+                  <Search className="absolute top-3 left-3.5 h-4 w-4 text-cyan-400" />
+                  <input
+                    type="text"
+                    value={searchQuery}
+                    placeholder="Поиск по названию или описанию..."
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    className="w-full rounded-xl border border-slate-800 bg-slate-950 py-2.5 pr-4 pl-10 text-xs font-semibold text-white placeholder:text-slate-500 focus:border-cyan-405 focus:bg-slate-950 focus:outline-none transition-all"
+                  />
+                  {searchError && (
+                    <span className="absolute left-1 -bottom-5 text-[10px] font-bold text-rose-450 font-mono">
+                      {searchError}
+                    </span>
+                  )}
+                </div>
+
+                {/* Sort selection drop down */}
+                <div className="flex items-center gap-3 self-baseline sm:self-auto">
+                  <span className="text-xs font-bold text-slate-400 uppercase tracking-widest">Сортировать:</span>
+                  <select
+                    value={sortOption}
+                    onChange={(e) => setSortOption(e.target.value)}
+                    className="rounded-xl border border-slate-800 bg-slate-950 px-3 py-2 text-xs font-semibold text-slate-200 focus:outline-none focus:ring-1 focus:ring-cyan-400 cursor-pointer"
+                  >
+                    <option value="popularity">Популярность (Подписчики)</option>
+                    <option value="rating">Высокий рейтинг</option>
+                    <option value="price_asc">Цена по возрастанию</option>
+                    <option value="price_desc">Цена по убыванию</option>
+                    <option value="new">Сначала новые</option>
+                  </select>
+                </div>
+
+              </div>
+
+              {/* Category Breadcrumbs chain */}
+              {breadcrumbs.length > 0 && (
+                <div className="flex flex-wrap items-center gap-1.5 rounded-xl bg-cyan-950/20 px-4 py-2 text-[11px] text-cyan-400 font-semibold border border-cyan-900/40">
+                  <span className="text-cyan-400/80">Навигация:</span>
+                  <span>Все категории</span>
+                  {breadcrumbs.map((b) => (
+                    <React.Fragment key={b.id}>
+                      <ChevronRight className="h-3 w-3 text-cyan-500" />
+                      <span className={b.is_current ? "text-white font-extrabold" : "text-cyan-400"}>
+                        {b.name}
+                      </span>
+                    </React.Fragment>
+                  ))}
+                </div>
+              )}
+
+              {/* Main Products Grid Column */}
+              {loading ? (
+                <div className="flex flex-col items-center justify-center py-20">
+                  <div className="h-8 w-8 animate-spin rounded-full border-2 border-cyan-400 border-t-transparent" />
+                  <span className="mt-4 text-xs font-semibold text-slate-450 font-mono">Запрос товаров от B2B роутера...</span>
+                </div>
+              ) : products.length === 0 ? (
+                <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-slate-800 bg-slate-900/20 py-16 px-4 text-center">
+                  <div className="flex h-12 w-12 items-center justify-center rounded-full bg-slate-900 border border-slate-800 text-slate-400">
+                    <Search className="h-6 w-6" />
+                  </div>
+                  <h3 className="mt-4 font-sans text-sm font-bold text-white">Увы, совпадений нет</h3>
+                  <p className="mt-1 text-xs text-slate-500 max-w-sm leading-normal">
+                    Мы не нашли каналов под выбранные ценовые ограничения или фильтры. Попробуйте сбросить параметры.
+                  </p>
+                  <button
+                    onClick={handleResetFilters}
+                    className="mt-4 rounded-xl bg-slate-900 text-slate-300 border border-slate-800 px-4 py-2 text-xs font-bold hover:bg-slate-800 transition-colors"
+                  >
+                    Сбросить все фильтры
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-bold text-slate-450 uppercase tracking-widest font-mono">
+                      Найдено каналов: {totalCount}
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
+                    {products.map((p) => (
+                      <ChannelCard
+                        key={p.id}
+                        channel={p}
+                        onClick={() => handleSelectProduct(p.id)}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
+
+            </div>
+
+          </div>
+
+      </main>
+
+      {/* Slide-out Cart Sidebar drawer */}
+      {isCartOpen && (
+        <div className="fixed inset-0 z-50 flex justify-end bg-slate-950/80 p-0 backdrop-blur-sm">
+          <div className="h-full w-full max-w-sm bg-slate-900/95 p-6 shadow-2xl flex flex-col justify-between animate-in slide-in-from-right duration-250 glass border-l border-slate-800">
+            <div>
+              <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+                <h3 className="font-sans text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1.5">
+                  <ShoppingCart className="h-4 w-4 text-cyan-400" /> Ваша Корзина B2C
+                </h3>
+                <button
+                  onClick={() => setIsCartOpen(false)}
+                  className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white transition-colors duration-150"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+
+              {cart.length === 0 ? (
+                <div className="text-center py-20 text-slate-500 flex flex-col items-center justify-center">
+                  <ShoppingCart className="h-10 w-10 text-slate-800" />
+                  <span className="text-xs font-bold mt-4 block text-slate-450">Корзина пока пуста</span>
+                  <span className="text-[10px] text-slate-550 max-w-xs block mt-1 leading-normal">
+                    Выберите подходящий Телеграм-канал и добавьте его SKU внутри карточки товара.
+                  </span>
+                </div>
+              ) : (
+                <div className="mt-6 space-y-4 max-h-[60vh] overflow-y-auto pr-1">
+                  {cart.map((item) => {
+                    const skuSubtotal = Math.round((item.sku.price * item.quantity) / 100);
+                    return (
+                      <div
+                        key={item.sku.id}
+                        className="flex items-start justify-between border-b border-slate-850 pb-4 animate-in fade-in"
+                      >
+                        <div>
+                          <span className="block text-xs font-bold text-white leading-tight">{item.productName}</span>
+                          <span className="block text-[10px] text-cyan-400 mt-1 font-semibold">{item.sku.name}</span>
+                          <span className="block text-[9px] text-slate-500 mt-1 font-mono">Код: {item.sku.sku_code}</span>
+                        </div>
+                        <div className="text-right shrink-0">
+                          <span className="block font-mono text-xs font-extrabold text-white">
+                            {skuSubtotal.toLocaleString("ru-RU")} ₽
+                          </span>
+                          <button
+                            onClick={() => handleRemoveFromCart(item.sku.id)}
+                            className="text-[9px] font-bold text-rose-400 hover:text-rose-350 hover:underline mt-1 block"
+                          >
+                            Удалить
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {cart.length > 0 && (
+              <div className="border-t border-slate-800 pt-6">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="text-[9px] text-slate-400 uppercase tracking-widest font-semibold block">Итого к оплате</span>
+                    <span className="block font-mono text-base font-extrabold text-cyan-400 neon-text mt-1">
+                      {Math.round(cartTotal / 100).toLocaleString("ru-RU")} ₽
+                    </span>
+                  </div>
+                  <button
+                    onClick={handleSimulatedCheckout}
+                    disabled={checkoutFinished}
+                    className="rounded-xl bg-white text-slate-900 px-5 py-2.5 text-xs font-extrabold hover:bg-cyan-400 hover:text-slate-950 disabled:bg-emerald-600 disabled:text-white transition-all duration-200"
+                  >
+                    {checkoutFinished ? "🎉 Оплата принята!" : "Купить активы"}
+                  </button>
+                </div>
+                {checkoutFinished && (
+                  <div className="mt-3 rounded-xl bg-emerald-950/80 border border-emerald-900/50 p-3 text-center text-[10px] text-emerald-400 font-semibold leading-relaxed">
+                    Заказ NM-2026-000452 успешно создан! Отправлен на B2B-раннер. Права передаются через Безопасный Гарант.
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Channel Details popup panel */}
+      {selectedProductId && activeChannelDetail && (
+        <ChannelDetailModal
+          productId={selectedProductId}
+          currentProduct={activeChannelDetail}
+          setCurrentProduct={setActiveChannelDetail}
+          onClose={() => {
+            setSelectedProductId(null);
+            setActiveChannelDetail(null);
+          }}
+          onAddToCart={handleAddToCart}
+          onLoadProductDetail={handleLoadProductDetail}
+        />
+      )}
+
+    </div>
+  );
+}
