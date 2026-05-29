@@ -7,7 +7,8 @@ from uuid import UUID
 
 from app.schemas import (
     CategoryRef, CatalogProductCard, PaginatedCatalogProducts,
-    FacetsResponse, FacetGroup, FacetItem
+    FacetsResponse, FacetGroup, FacetItem, CatalogProductDetail,
+    BreadcrumbItem, BreadcrumbsResponse
 )
 from app.b2b_client import B2BClient
 
@@ -224,15 +225,12 @@ def get_products(
     elif resolved_sort == "price_desc":
         items.sort(key=lambda x: x["price"], reverse=True)
     elif resolved_sort == "rating":
-        items.sort(key=lambda x: x.get("rating", 0), reverse=True)
-    elif resolved_sort == "discount_desc":
-        # Считаем разницу между старой и новой ценой
-        items.sort(key=lambda x: (x.get("old_price", 0) - x["price"]), reverse=True)
+        items.sort(key=lambda x: x["rating"], reverse=True)
     elif resolved_sort in ["new", "date_desc"]:
         items.sort(key=lambda x: x["id"])
     else:  # "popularity" (default)
         items.sort(key=lambda x: x["subscribers"], reverse=True)
-        
+
     total_count = len(items)
     paginated = items[offset:offset+limit]
 
@@ -307,6 +305,7 @@ def get_facets(
                 detail={"code": "INVALID_REQUEST", "message": "Invalid category ID format"}
             )
 
+    # Resolve price bounds (in kopecks)
     p_min_raw = params.get("price_min") or (str(price_min) if price_min is not None else None)
     resolved_price_min = None
     if p_min_raw is not None and p_min_raw != "":
@@ -393,22 +392,292 @@ def get_facets(
         ]
     )
 
-@app.get("/api/v1/categories/{id}/filters")
-def get_category_filters(id: UUID):
-    # В реальном B2B это берется из характеристик категории
-    return {
-        "items": [
-            {
-                "slug": "price",
-                "name": "Цена",
-                "type": "range",
-                "min": 0, 
-                "max": 100000000
-            },
-            {
-                "slug": "verified",
-                "name": "Верифицированный канал",
-                "type": "switch"
-            }
-        ]
+@app.get("/api/v1/catalog/products/{id}", response_model=CatalogProductDetail)
+@app.get("/api/v1/products/{id}", response_model=CatalogProductDetail)
+def get_product_detail(
+    id: UUID,
+    x_service_key: Optional[str] = Header(None, alias="X-Service-Key"),
+    x_simulate_b2b_outage: Optional[str] = Header(None, alias="X-Simulate-B2B-Outage")
+):
+    # Simulate B2B outage if header is sent
+    if x_simulate_b2b_outage == "true" or b2b_client.simulate_outage:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "B2B_UNAVAILABLE", "message": "B2B Service Unavailable (Simulated/Real Outage)"}
+        )
+
+    try:
+        effective_key = x_service_key or "B2B_SECRET_KEY_PROD_2026"
+        b2b_client._check_auth({"X-Service-Key": effective_key})
+        raw_products = b2b_client._products
+        b2b_categories = b2b_client._categories
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "B2B_UNAVAILABLE", "message": f"B2B service raised an integration fault: {str(e)}"}
+        )
+
+    p = next((prod for prod in raw_products if prod["id"] == id), None)
+    if not p:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "NOT_FOUND", "message": "Product not found"}
+        )
+
+    # Visibility checks
+    if p.get("status") != "MODERATED" or p.get("deleted", False):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "NOT_FOUND", "message": "Product is blocked or deleted"}
+        )
+
+    # Process category details
+    cat_ref = next((c for c in b2b_categories if c["id"] == p["category_id"]), None)
+    cat_path = get_breadcrumbs_for_category(b2b_categories, cat_ref["id"]) if cat_ref else []
+
+    # Map available SKUs (Ensure strict safety - cost_price and reserved_quantity never leak)
+    formatted_skus = []
+    raw_skus = p.get("skus", [])
+    if not raw_skus:
+        # Provide a standard B2C sku mapping matching loaded cards
+        raw_skus = [{
+            "id": f"sku-std-{p['id']}",
+            "name": "Полная передача прав (Базовый)",
+            "sku_code": f"TG-{p['slug'].upper()}-BASE",
+            "price": p["price"],
+            "old_price": p.get("old_price"),
+            "available_quantity": p.get("active_quantity", 0),
+            "attributes": { "Помощь в транзите": "Да", "Обучение": "7 дней" },
+            "images": p.get("images", [])
+        }]
+
+    for sku in raw_skus:
+        # Calculate discount: if there is an old price and it is higher than current price
+        price = sku["price"]
+        old_price = sku.get("old_price", 0) or 0
+        calculated_discount = max(0, old_price - price) if old_price > 0 else 0
+
+        sku_clean = {
+            "id": str(sku["id"]),
+            "name": sku["name"],
+            "sku_code": sku["sku_code"],
+            "price": price,
+            "old_price": sku.get("old_price"),
+            "discount": calculated_discount,
+            "available_quantity": sku.get("available_quantity", sku.get("active_quantity", 0)),
+            "attributes": sku.get("attributes", {}),
+            "images": sku.get("images", p.get("images", []))
+        }
+        # Express-ly erase any private field if present (Double-Glow Defense Pattern)
+        if "cost_price" in sku_clean:
+            del sku_clean["cost_price"]
+        if "reserved_quantity" in sku_clean:
+            del sku_clean["reserved_quantity"]
+        formatted_skus.append(sku_clean)
+
+    # Product overall availability reflects active_quantity / SKU quantities
+    has_stock = any(sku["available_quantity"] > 0 for sku in formatted_skus) or p.get("active_quantity", 0) > 0
+
+    response_data = {
+        "id": p["id"],
+        "name": p["title"],
+        "slug": p["slug"],
+        "description": p["description"],
+        "category": {
+            "id": cat_ref["id"],
+            "name": cat_ref["name"],
+            "level": len(cat_path) - 1,
+            "path": [t["name"] for t in cat_path]
+        } if cat_ref else None,
+        "min_price": p["price"],
+        "old_price": p.get("old_price"),
+        "has_stock": has_stock,
+        "rating": p.get("rating"),
+        "reviews_count": p.get("reviews_count", 0),
+        "subscribers": p["subscribers"],
+        "monthly_income": p["monthly_income"],
+        "er": p["er"],
+        "verified": p["verified"],
+        "images": p.get("images", []),
+        "seller": p.get("seller"),
+        "attributes": p.get("attributes", {
+            "Subscribers": p["subscribers"],
+            "ER": f"{p['er']}%",
+            "Verified": "Yes" if p["verified"] else "No"
+        }),
+        "characteristics": p.get("characteristics", [
+            { "name": "Тематика", "value": cat_ref["name"] if cat_ref else "Медиабизнес" },
+            { "name": "Язык аудитории", "value": "Русский" },
+            { "name": "Вовлеченность (ER)", "value": f"{p['er']}%" }
+        ]),
+        "skus": formatted_skus
     }
+
+    return CatalogProductDetail(**response_data)
+
+
+@app.get("/api/v1/catalog/products/{id}/similar", response_model=List[CatalogProductCard])
+@app.get("/api/v1/products/{id}/similar", response_model=List[CatalogProductCard])
+def get_similar_products(
+    id: UUID,
+    limit: int = Query(8, ge=1, le=20),
+    x_service_key: Optional[str] = Header(None, alias="X-Service-Key"),
+    x_simulate_b2b_outage: Optional[str] = Header(None, alias="X-Simulate-B2B-Outage")
+):
+    if x_simulate_b2b_outage == "true" or b2b_client.simulate_outage:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "B2B_UNAVAILABLE", "message": "B2B Service Unavailable (Simulated/Real Outage)"}
+        )
+
+    try:
+        effective_key = x_service_key or "B2B_SECRET_KEY_PROD_2026"
+        b2b_headers = {"X-Service-Key": effective_key}
+        raw_products = b2b_client._products
+        b2b_categories = b2b_client._categories
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "B2B_UNAVAILABLE", "message": f"B2B service raised an integration fault: {str(e)}"}
+        )
+
+    p = next((prod for prod in raw_products if prod["id"] == id), None)
+    if not p:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "NOT_FOUND", "message": "Product not found"}
+        )
+
+    # Establish similarity search using matching subcategory, sister category or parent categories
+    cur_cat = next((c for c in b2b_categories if c["id"] == p["category_id"]), None)
+    allowed_category_ids = [p["category_id"]]
+    if cur_cat and cur_cat["parent_id"]:
+        allowed_category_ids.append(cur_cat["parent_id"])
+        sister_ids = [c["id"] for c in b2b_categories if c["parent_id"] == cur_cat["parent_id"]]
+        allowed_category_ids.extend(sister_ids)
+
+    similar_set = []
+    for prod in raw_products:
+        if prod["id"] == id:
+            continue
+        # Only visible (status MODERATED, not deleted, active_quantity > 0)
+        if prod.get("status") == "MODERATED" and not prod.get("deleted", False) and prod.get("active_quantity", 0) > 0:
+            if prod["category_id"] in allowed_category_ids:
+                similar_set.append(prod)
+
+    if not similar_set:
+        for prod in raw_products:
+            if prod["id"] == id:
+                continue
+            if prod.get("status") == "MODERATED" and not prod.get("deleted", False) and prod.get("active_quantity", 0) > 0:
+                similar_set.append(prod)
+
+    similar_sliced = similar_set[:limit]
+
+    response_items = []
+    for sp in similar_sliced:
+        cat_ref = next((c for c in b2b_categories if c["id"] == sp["category_id"]), None)
+        cat_path = get_breadcrumbs_for_category(b2b_categories, cat_ref["id"]) if cat_ref else []
+        response_items.append({
+            "id": sp["id"],
+            "name": sp["title"],
+            "slug": sp["slug"],
+            "category": {
+                "id": cat_ref["id"],
+                "name": cat_ref["name"],
+                "level": len(cat_path) - 1,
+                "path": [t["name"] for t in cat_path]
+            } if cat_ref else None,
+            "min_price": sp["price"],
+            "old_price": sp.get("old_price"),
+            "has_stock": sp.get("active_quantity", 0) > 0,
+            "rating": sp.get("rating"),
+            "reviews_count": sp.get("reviews_count", 0),
+            "subscribers": sp["subscribers"],
+            "monthly_income": sp["monthly_income"],
+            "er": sp["er"],
+            "verified": sp["verified"],
+            "images": sp.get("images", []),
+            "seller": sp.get("seller")
+        })
+
+    return response_items
+
+
+@app.get("/api/v1/breadcrumbs", response_model=BreadcrumbsResponse)
+def get_breadcrumbs(
+    category_id: Optional[UUID] = Query(None),
+    product_id: Optional[UUID] = Query(None),
+    x_service_key: Optional[str] = Header(None, alias="X-Service-Key"),
+    x_simulate_b2b_outage: Optional[str] = Header(None, alias="X-Simulate-B2B-Outage")
+):
+    if x_simulate_b2b_outage == "true" or b2b_client.simulate_outage:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "B2B_UNAVAILABLE", "message": "B2B Service Unavailable (Simulated/Real Outage)"}
+        )
+
+    # 400 cases for parameters validations
+    if category_id is not None and product_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "AMBIGUOUS_PARAM", "message": "only one of category_id or product_id must be provided"}
+        )
+    if category_id is None and product_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "MISSING_PARAM", "message": "category_id or product_id must be provided"}
+        )
+
+    try:
+        effective_key = x_service_key or "B2B_SECRET_KEY_PROD_2026"
+        b2b_headers = {"X-Service-Key": effective_key}
+        raw_products = b2b_client._products
+        b2b_categories = b2b_client._categories
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "B2B_UNAVAILABLE", "message": f"B2B service raised an integration fault: {str(e)}"}
+        )
+
+    target_category_id = None
+    resolved_via = "category_id"
+
+    if category_id:
+        target_category_id = category_id
+    elif product_id:
+        resolved_via = "product_id"
+        p = next((prod for prod in raw_products if prod["id"] == product_id), None)
+        if not p:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"code": "NOT_FOUND", "message": "Product not found"}
+            )
+        target_category_id = p["category_id"]
+
+    # Verify category exists
+    cat_exists = next((c for c in b2b_categories if c["id"] == target_category_id), None)
+    if not cat_exists:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "NOT_FOUND", "message": "Category not found"}
+        )
+
+    trail = get_breadcrumbs_for_category(b2b_categories, target_category_id)
+
+    # Verify hierarchy for orphans if category is loaded but no path can be traced (not applicable here, but good practice)
+    if not trail and target_category_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "ORPHAN_NODE", "message": "category hierarchy is broken"}
+        )
+
+    items = [BreadcrumbItem(**t) for t in trail]
+
+    return BreadcrumbsResponse(
+        data=items,
+        meta={
+            "resolved_via": resolved_via,
+            "category_id": str(target_category_id)
+        }
+    )

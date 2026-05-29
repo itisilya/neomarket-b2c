@@ -36,6 +36,7 @@ class CatalogSku(BaseModel):
     sku_code: str
     price: int # Price in kopecks
     old_price: Optional[int] = None # Price in kopecks
+    discount: int = 0
     available_quantity: int = Field(ge=0)
     attributes: Dict[str, Any] = {}
     images: List[ImageRef]
