@@ -126,3 +126,66 @@ def test_empty_results_returns_200():
     assert len(data["items"]) == 0
     assert data["total_count"] == 0
 
+def test_product_card_returns_full_data_with_skus():
+    """
+    product_card_returns_full_data_with_skus (Happy Path):
+    Ensures that fetching a valid moderated product returns full descriptions, characteristics,
+    and SKU variations with pricing and stock availability.
+    """
+    target_id = "770e8400-e29b-41d4-a716-446655440001"
+    response = client.get(f"/api/v1/catalog/products/{target_id}")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["id"] == target_id
+    assert "description" in data
+    assert "skus" in data
+    assert len(data["skus"]) >= 1
+    assert "price" in data["skus"][0]
+
+def test_cost_price_absent_in_response():
+    """
+    cost_price_absent_in_response:
+    Explicit check to ensure private fields (cost_price, reserved_quantity)
+    associated with b2b sales are NOT present in any sku object returned to the B2C buyer.
+    """
+    target_id = "770e8400-e29b-41d4-a716-446655440001"
+    response = client.get(f"/api/v1/catalog/products/{target_id}")
+    assert response.status_code == 200
+    data = response.json()
+    for sku in data["skus"]:
+        assert "cost_price" not in sku
+        assert "reserved_quantity" not in sku
+
+def test_blocked_product_returns_404():
+    """
+    blocked_product_returns_404:
+    Verifies that deleted or pending draft products throw a clean 404 block response.
+    """
+    # Draft product UUID
+    draft_id = "770e8400-e29b-41d4-a716-446655440099"
+    response_draft = client.get(f"/api/v1/catalog/products/{draft_id}")
+    assert response_draft.status_code == 404
+
+    # Deleted product UUID
+    deleted_id = "770e8400-e29b-41d4-a716-446655440098"
+    response_deleted = client.get(f"/api/v1/catalog/products/{deleted_id}")
+    assert response_deleted.status_code == 404
+
+def test_sku_without_stock_is_shown_as_unavailable():
+    """
+    unhappy: sku_without_stock_is_shown_as_unavailable
+    Если остаток 0, товар все равно должен открываться по прямой ссылке, 
+    но поле has_stock должно быть false.
+    """
+    # ID товара из твоего b2b_client.py с active_quantity = 0
+    out_of_stock_id = "770e8400-e29b-41d4-a716-446655440097"
+    response = client.get(f"/api/v1/catalog/products/{out_of_stock_id}")
+    
+    assert response.status_code == 200
+    data = response.json()
+    assert data["has_stock"] is False
+    # Проверяем доступность в SKU
+    for sku in data["skus"]:
+        assert sku["available_quantity"] == 0
+
+
