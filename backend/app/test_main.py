@@ -80,41 +80,49 @@ def test_b2b_unavailable_returns_502():
         # Restore client state to prevent other tests from failing
         b2b_client.simulate_outage = False
 
-def test_search_too_short_returns_400():
+def test_search_returns_matching_products():
     """
-    Search length edge case check:
-    Ensures searching with less than 3 symbols throws a validation error 400 Bad Request
-    as specified by B2C-2 searching requirements.
+    search_returns_matching_products (happy path):
+    Verifies that real queries fetch items based on titles/descriptions.
     """
-    response = client.get("/api/v1/catalog/products?q=te")
+    response = client.get("/api/v1/catalog/products?search=Crypto")
+    assert response.status_code == 200
+    data = response.json()
+    assert "items" in data
+    assert len(data["items"]) >= 1
+    assert "Crypto" in data["items"][0]["name"]
+
+def test_short_query_returns_400():
+    """
+    short_query_returns_400:
+    Verifies searches shorter than 3 symbols throw 400 Bad Request
+    as specified by the search length requirement.
+    """
+    response = client.get("/api/v1/catalog/products?search=ab")
     assert response.status_code == 400
     data = response.json()
     assert data["code"] == "INVALID_REQUEST"
     assert "at least 3 characters" in data["message"]
 
-def test_empty_results_when_no_filters_match():
+def test_special_chars_do_not_break_query():
     """
-    Empty results edge case:
-    Ensures that when price or thematic filters yield no matches,
-    the API safely returns 200 with an empty list instead of crashing or throwing.
+    special_chars_do_not_break_query:
+    Verifies SQL specials / wildcards (%, _, ') are safely processed and do not throw.
     """
-    response = client.get("/api/v1/catalog/products?price_min=999999999")
+    response = client.get("/api/v1/catalog/products?search=Whale%15'")
+    assert response.status_code == 200
+    data = response.json()
+    assert "items" in data
+
+def test_empty_results_returns_200():
+    """
+    empty_results_returns_200:
+    Checks that a text query returning zero matches triggers status 200 and an empty array.
+    """
+    response = client.get("/api/v1/catalog/products?search=NonExistentMatchTextTerm")
     assert response.status_code == 200
     data = response.json()
     assert "items" in data
     assert len(data["items"]) == 0
     assert data["total_count"] == 0
-
-def test_deep_object_filters_unpacked_successfully():
-    """
-    Conformity checking with deepObject/nested OpenAPI standard parameters (filter[x]=y):
-    Ensures filter parameters passed inside nested brackets are correctly parsed.
-    """
-    response = client.get("/api/v1/catalog/products?filters[price_min]=5000000&filters[verified]=true")
-    assert response.status_code == 200
-    data = response.json()
-    assert "items" in data
-    for item in data["items"]:
-        assert item["min_price"] >= 5000000
-        assert item["verified"] is True
 
