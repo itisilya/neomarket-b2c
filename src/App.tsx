@@ -160,6 +160,15 @@ export default function App() {
   };
 
   const handleLoadProductDetail = async (id: string): Promise<CatalogProductDetail | null> => {
+    try {
+      const res = await fetch(`/api/v1/catalog/products/${id}`);
+      if (res.ok) {
+        return await res.json();
+      }
+    } catch (err) {
+      console.error("Failed fetching product detail from backend, falling back:", err);
+    }
+
     const foundCard = products.find(p => p.id === id);
     if (foundCard) {
       // Mock full details using the loaded product card representation safely

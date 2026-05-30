@@ -34,8 +34,8 @@ class CatalogSku(BaseModel):
     id: str
     name: str
     sku_code: str
-    price: int # Price in kopecks
-    old_price: Optional[int] = None # Price in kopecks
+    price: int
+    old_price: Optional[int] = None
     discount: int = 0
     available_quantity: int = Field(ge=0)
     attributes: Dict[str, Any] = {}
@@ -46,8 +46,8 @@ class CatalogProductCard(BaseModel):
     name: str
     slug: str
     category: Optional[CategoryRef] = None
-    min_price: int # Minimum price among available SKUs in kopecks
-    old_price: Optional[int] = None # in kopecks
+    min_price: int # Minimum price among available SKUs
+    old_price: Optional[int] = None
     has_stock: bool
     rating: Optional[float] = Field(default=None, ge=0, le=5)
     reviews_count: int = Field(default=0, ge=0)

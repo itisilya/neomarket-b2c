@@ -565,13 +565,6 @@ def get_similar_products(
             if prod["category_id"] in allowed_category_ids:
                 similar_set.append(prod)
 
-    if not similar_set:
-        for prod in raw_products:
-            if prod["id"] == id:
-                continue
-            if prod.get("status") == "MODERATED" and not prod.get("deleted", False) and prod.get("active_quantity", 0) > 0:
-                similar_set.append(prod)
-
     similar_sliced = similar_set[:limit]
 
     response_items = []
