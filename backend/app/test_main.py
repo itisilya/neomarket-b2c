@@ -177,15 +177,59 @@ def test_sku_without_stock_is_shown_as_unavailable():
     Если остаток 0, товар все равно должен открываться по прямой ссылке, 
     но поле has_stock должно быть false.
     """
-    # ID товара из твоего b2b_client.py с active_quantity = 0
     out_of_stock_id = "770e8400-e29b-41d4-a716-446655440097"
     response = client.get(f"/api/v1/catalog/products/{out_of_stock_id}")
     
     assert response.status_code == 200
     data = response.json()
     assert data["has_stock"] is False
-    # Проверяем доступность в SKU
+
     for sku in data["skus"]:
         assert sku["available_quantity"] == 0
 
+def test_similar_returns_up_to_8_from_same_category():
+    """
+    happy: similar_returns_up_to_8_from_same_category
+    Запрашивает похожие товары для конкретного товара. 
+    Проверяет, что возвращается массив до 8 товаров, и сам исходный товар исключен из результатов.
+    """
+    target_id = "770e8400-e29b-41d4-a716-446655440001"
+    response = client.get(f"/api/v1/catalog/products/{target_id}/similar")
+    assert response.status_code == 200
+    data = response.json()
+    assert isinstance(data, list)
+    assert len(data) <= 8
+    
+    # Сам запрашиваемый товар не должен присутствовать в списке похожих
+    for item in data:
+        assert item["id"] != target_id
 
+def test_empty_category_returns_200_empty_list():
+    """
+    unhappy: empty_category_returns_200_empty_list
+    Если нет других подходящих похожих товаров (например, только один товар во всей базе),
+    эндпоинт должен возвращать пустой список с кодом 200.
+    """
+    from uuid import UUID
+    original_products = b2b_client._products
+    try:
+        # Оставляем только один товар
+        single_prod = next(p for p in original_products if p["id"] == UUID("770e8400-e29b-41d4-a716-446655440001"))
+        b2b_client._products = [single_prod]
+        
+        response = client.get(f"/api/v1/catalog/products/{single_prod['id']}/similar")
+        assert response.status_code == 200
+        data = response.json()
+        assert isinstance(data, list)
+        assert len(data) == 0
+    finally:
+        b2b_client._products = original_products
+
+def test_unknown_product_returns_404():
+    """
+    unhappy: unknown_product_returns_404
+    Запрос похожих товаров для несуществующего uuid товара возвращает 404.
+    """
+    unknown_id = "00000000-0000-0000-0000-000000000000"
+    response = client.get(f"/api/v1/catalog/products/{unknown_id}/similar")
+    assert response.status_code == 404
