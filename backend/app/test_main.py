@@ -233,3 +233,100 @@ def test_unknown_product_returns_404():
     unknown_id = "00000000-0000-0000-0000-000000000000"
     response = client.get(f"/api/v1/catalog/products/{unknown_id}/similar")
     assert response.status_code == 404
+
+
+def test_category_tree_returns_nested_structure():
+    """
+    happy: category_tree_returns_nested_structure
+    Дерево собирается из плоского списка
+    """
+    response = client.get("/api/v1/catalog/categories/tree")
+    assert response.status_code == 200
+    data = response.json()
+    assert "items" in data
+    assert len(data["items"]) > 0
+    # Check structure: each category should have level, path, children, id, name
+    for item in data["items"]:
+        assert "id" in item
+        assert "name" in item
+        assert "level" in item
+        assert "path" in item
+        assert "children" in item
+        assert isinstance(item["children"], list)
+
+
+def test_breadcrumbs_return_path_from_root():
+    """
+    happy: breadcrumbs_return_path_from_root
+    Цепочка от корня до категории
+    """
+    cat_id = "e1010000-e29b-41d4-a716-446655440010" # Иностранные языки, parent (Образование & Наука)
+    response = client.get(f"/api/v1/breadcrumbs?category_id={cat_id}")
+    assert response.status_code == 200
+    data = response.json()
+    assert "data" in data
+    breadcrumbs = data["data"]
+    assert len(breadcrumbs) >= 2
+    assert breadcrumbs[0]["name"] == "Образование & Наука"
+    assert breadcrumbs[1]["name"] == "Иностранные языки"
+    assert breadcrumbs[0]["level"] == 0
+    assert breadcrumbs[1]["level"] == 1
+    assert breadcrumbs[0]["is_current"] is False
+    assert breadcrumbs[1]["is_current"] is True
+
+
+def test_ambiguous_params_returns_400():
+    """
+    unhappy: ambiguous_params_returns_400
+    Оба параметра одновременно в breadcrumbs -> 400
+    """
+    url = "/api/v1/breadcrumbs?category_id=e1010000-e29b-41d4-a716-446655440010&product_id=770e8400-e29b-41d4-a716-446655440001"
+    response = client.get(url)
+    assert response.status_code == 400
+    data = response.json()
+    assert data["code"] == "AMBIGUOUS_PARAM"
+
+
+def test_orphan_node_returns_422():
+    """
+    unhappy: orphan_node_returns_422
+    Сломанная иерархия (orphan node) -> 422
+    """
+    from uuid import UUID
+    original_categories = b2b_client._categories
+    try:
+        # Simulate an orphan category node by injecting a temporary card
+        orphan_id = UUID("e1010000-0000-0000-0000-999999999999")
+        orphan_node = {
+            "id": orphan_id,
+            "name": "Orphan Category",
+            "slug": "orphan-cat",
+            "parent_id": UUID("e1010000-0000-0000-0000-888888888888") # Missing parent
+        }
+        b2b_client._categories = original_categories + [orphan_node]
+        
+        # Query detail for the orphan category node -> 422
+        response_detail = client.get(f"/api/v1/catalog/categories/{orphan_id}")
+        assert response_detail.status_code == 422
+        data_det = response_detail.json()
+        assert data_det["code"] == "ORPHAN_NODE"
+
+        # Query breadcrumbs for the orphan category node -> 422
+        response_crumbs = client.get(f"/api/v1/breadcrumbs?category_id={orphan_id}")
+        assert response_crumbs.status_code == 422
+        data_crumbs = response_crumbs.json()
+        assert data_crumbs["code"] == "ORPHAN_NODE"
+    finally:
+        b2b_client._categories = original_categories
+
+
+def test_unknown_category_returns_404():
+    """
+    unhappy: unknown_category_returns_404
+    несуществующая категория -> 404
+    """
+    unknown_id = "00000000-0000-0000-0000-000000000000"
+    response = client.get(f"/api/v1/catalog/categories/{unknown_id}")
+    assert response.status_code == 404
+    data = response.json()
+    assert data["code"] == "NOT_FOUND"
