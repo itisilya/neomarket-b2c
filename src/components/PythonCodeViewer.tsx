@@ -27,14 +27,25 @@ from app.main import app
 
 client = TestClient(app)
 
-def test_get_products_list_happy_path():
-    response = client.get("/api/v1/catalog/products?sort=price_asc&limit=2")
+def test_category_tree_returns_nested_structure():
+    response = client.get("/api/v1/catalog/categories/tree")
     assert response.status_code == 200
 
-def test_search_too_short_validation_error():
-    response = client.get("/api/v1/catalog/products?q=ab")
+def test_breadcrumbs_return_path_from_root():
+    response = client.get("/api/v1/breadcrumbs?category_id=e1010000-e29b-41d4-a716-446655440010")
+    assert response.status_code == 200
+
+def test_ambiguous_params_returns_400():
+    response = client.get("/api/v1/breadcrumbs?category_id=e1010000-e29b-41d4-a716-446655440010&product_id=770e8400-e29b-41d4-a716-446655440001")
     assert response.status_code == 400
-    assert "at least 3 characters" in response.json()["detail"]`,
+
+def test_orphan_node_returns_422():
+    response = client.get("/api/v1/catalog/categories/e1010000-0000-0000-0000-999999999999")
+    assert response.status_code == 422
+
+def test_unknown_category_returns_404():
+    response = client.get("/api/v1/catalog/categories/00000000-0000-0000-0000-000000000000")
+    assert response.status_code == 404`,
 
     b2c_schemas: `from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any

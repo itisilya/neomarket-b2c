@@ -8,7 +8,8 @@ from uuid import UUID
 from app.schemas import (
     CategoryRef, CatalogProductCard, PaginatedCatalogProducts,
     FacetsResponse, FacetGroup, FacetItem, CatalogProductDetail,
-    BreadcrumbItem, BreadcrumbsResponse
+    BreadcrumbItem, BreadcrumbsResponse, CategoryDetailResponse,
+    CategoryTreeResponse, FlatCategoriesResponse
 )
 from app.b2b_client import B2BClient
 
@@ -87,6 +88,19 @@ def get_breadcrumbs_for_category(categories: List[Dict[str, Any]], cat_id: UUID)
         item["level"] = i
         item["is_current"] = (i == len(trail) - 1)
     return trail
+
+def is_orphan_node(categories: List[Dict[str, Any]], cat_id: UUID) -> bool:
+    current_id = cat_id
+    visited = set()
+    while current_id is not None:
+        if current_id in visited:
+            return True  # Cycle detected
+        visited.add(current_id)
+        cat = next((c for c in categories if c["id"] == current_id), None)
+        if not cat:
+            return True  # Parent not found
+        current_id = cat.get("parent_id")
+    return False
 
 @app.get("/api/v1/catalog/products", response_model=PaginatedCatalogProducts)
 @app.get("/api/v1/products", response_model=PaginatedCatalogProducts)
@@ -656,14 +670,14 @@ def get_breadcrumbs(
             detail={"code": "NOT_FOUND", "message": "Category not found"}
         )
 
-    trail = get_breadcrumbs_for_category(b2b_categories, target_category_id)
-
-    # Verify hierarchy for orphans if category is loaded but no path can be traced (not applicable here, but good practice)
-    if not trail and target_category_id:
+    # Validate orphan/broken hierarchy
+    if is_orphan_node(b2b_categories, target_category_id):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={"code": "ORPHAN_NODE", "message": "category hierarchy is broken"}
         )
+
+    trail = get_breadcrumbs_for_category(b2b_categories, target_category_id)
 
     items = [BreadcrumbItem(**t) for t in trail]
 
@@ -674,3 +688,156 @@ def get_breadcrumbs(
             "category_id": str(target_category_id)
         }
     )
+
+
+@app.get("/api/v1/catalog/categories/tree", response_model=CategoryTreeResponse)
+@app.get("/api/v1/categories/tree", response_model=CategoryTreeResponse)
+def get_categories_tree(
+    x_service_key: Optional[str] = Header(None, alias="X-Service-Key"),
+    x_simulate_b2b_outage: Optional[str] = Header(None, alias="X-Simulate-B2B-Outage")
+):
+    if x_simulate_b2b_outage == "true" or b2b_client.simulate_outage:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "B2B_UNAVAILABLE", "message": "B2B Service Unavailable"}
+        )
+    try:
+        b2b_categories = b2b_client._categories
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "B2B_UNAVAILABLE", "message": str(e)}
+        )
+
+    # Validate broken hierarchy/orphan node in database
+    for cat in b2b_categories:
+        if is_orphan_node(b2b_categories, cat["id"]):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"code": "ORPHAN_NODE", "message": "category hierarchy is broken"}
+            )
+
+    def build_tree(parent_id: Optional[UUID]) -> List[Dict[str, Any]]:
+        nodes = []
+        for cat in b2b_categories:
+            if cat["parent_id"] == parent_id:
+                trail = get_breadcrumbs_for_category(b2b_categories, cat["id"])
+                nodes.append({
+                    "id": cat["id"],
+                    "name": cat["name"],
+                    "parent_id": cat["parent_id"],
+                    "level": len(trail) - 1,
+                    "path": [t["name"] for t in trail],
+                    "children": build_tree(cat["id"])
+                })
+        return nodes
+
+    tree = build_tree(None)
+    return {"items": tree}
+
+
+@app.get("/api/v1/catalog/categories", response_model=FlatCategoriesResponse)
+@app.get("/api/v1/categories", response_model=FlatCategoriesResponse)
+def get_flat_categories(
+    x_service_key: Optional[str] = Header(None, alias="X-Service-Key"),
+    x_simulate_b2b_outage: Optional[str] = Header(None, alias="X-Simulate-B2B-Outage")
+):
+    if x_simulate_b2b_outage == "true" or b2b_client.simulate_outage:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "B2B_UNAVAILABLE", "message": "B2B Service Unavailable"}
+        )
+    try:
+        b2b_categories = b2b_client._categories
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "B2B_UNAVAILABLE", "message": str(e)}
+        )
+
+    # Validate broken hierarchy/orphan node in database
+    for cat in b2b_categories:
+        if is_orphan_node(b2b_categories, cat["id"]):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"code": "ORPHAN_NODE", "message": "category hierarchy is broken"}
+            )
+
+    refs = []
+    for c in b2b_categories:
+        trail = get_breadcrumbs_for_category(b2b_categories, c["id"])
+        refs.append({
+            "id": c["id"],
+            "name": c["name"],
+            "parent_id": c["parent_id"],
+            "level": len(trail) - 1,
+            "path": [t["name"] for t in trail]
+        })
+    return {"items": refs}
+
+
+@app.get("/api/v1/catalog/categories/{id}", response_model=CategoryDetailResponse)
+@app.get("/api/v1/categories/{id}", response_model=CategoryDetailResponse)
+def get_category_details(
+    id: UUID,
+    x_service_key: Optional[str] = Header(None, alias="X-Service-Key"),
+    x_simulate_b2b_outage: Optional[str] = Header(None, alias="X-Simulate-B2B-Outage")
+):
+    if x_simulate_b2b_outage == "true" or b2b_client.simulate_outage:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "B2B_UNAVAILABLE", "message": "B2B Service Unavailable"}
+        )
+    try:
+        b2b_categories = b2b_client._categories
+        raw_products = b2b_client._products
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "B2B_UNAVAILABLE", "message": str(e)}
+        )
+
+    # Validate category exists
+    cat = next((c for c in b2b_categories if c["id"] == id), None)
+    if not cat:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "NOT_FOUND", "message": f"Category with ID {id} not found."}
+        )
+
+    # Validate orphan/broken hierarchy
+    if is_orphan_node(b2b_categories, id):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "ORPHAN_NODE", "message": "category hierarchy is broken"}
+        )
+
+    parent_cat = next((p for p in b2b_categories if p["id"] == cat["parent_id"]), None) if cat.get("parent_id") else None
+
+    # Filter with B2B status/moderated rules
+    moderated_products = [
+        p for p in raw_products 
+        if p.get("status") == "MODERATED" and not p.get("deleted", False) and p.get("active_quantity", 0) > 0
+    ]
+    product_count = len([p for p in moderated_products if p["category_id"] == id])
+
+    return {
+        "id": cat["id"],
+        "name": cat["name"],
+        "slug": cat["slug"],
+        "description": f"Premium channels in {cat['name']} marketplace. Ideal for media business and automated ad revenue.",
+        "parent": {
+            "id": parent_cat["id"],
+            "name": parent_cat["name"],
+            "slug": parent_cat["slug"]
+        } if parent_cat else None,
+        "product_count": product_count,
+        "seo": {
+            "title": f"Buy TG Channel in {cat['name']} | NeoMarket",
+            "description": f"Premium and moderated Telegram channels specializing in {cat['name']}. Instant and safe ownership transfer.",
+            "keywords": ["telegram channels", cat["slug"], "buy telegram chat"]
+        },
+        "is_active": True,
+        "created_at": "2026-01-15T10:30:00Z"
+    }
+

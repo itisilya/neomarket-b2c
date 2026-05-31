@@ -34,8 +34,8 @@ class CatalogSku(BaseModel):
     id: str
     name: str
     sku_code: str
-    price: int
-    old_price: Optional[int] = None
+    price: int # Price in kopecks
+    old_price: Optional[int] = None # Price in kopecks
     discount: int = 0
     available_quantity: int = Field(ge=0)
     attributes: Dict[str, Any] = {}
@@ -46,8 +46,8 @@ class CatalogProductCard(BaseModel):
     name: str
     slug: str
     category: Optional[CategoryRef] = None
-    min_price: int # Minimum price among available SKUs
-    old_price: Optional[int] = None
+    min_price: int # Minimum price among available SKUs in kopecks
+    old_price: Optional[int] = None # in kopecks
     has_stock: bool
     rating: Optional[float] = Field(default=None, ge=0, le=5)
     reviews_count: int = Field(default=0, ge=0)
@@ -94,3 +94,38 @@ class BreadcrumbItem(BaseModel):
 class BreadcrumbsResponse(BaseModel):
     data: List[BreadcrumbItem]
     meta: Dict[str, Any]
+
+class CategoryDetailParent(BaseModel):
+    id: UUID
+    name: str
+    slug: str
+
+class CategoryDetailSeo(BaseModel):
+    title: str
+    description: str
+    keywords: List[str]
+
+class CategoryDetailResponse(BaseModel):
+    id: UUID
+    name: str
+    slug: str
+    description: str
+    parent: Optional[CategoryDetailParent] = None
+    product_count: int
+    seo: CategoryDetailSeo
+    is_active: bool
+    created_at: str
+
+class CategoryTreeResponse(BaseModel):
+    items: List[CategoryTreeNode]
+
+class FlatCategoryItem(BaseModel):
+    id: UUID
+    name: str
+    parent_id: Optional[UUID] = None
+    level: int
+    path: List[str]
+
+class FlatCategoriesResponse(BaseModel):
+    items: List[FlatCategoryItem]
+
