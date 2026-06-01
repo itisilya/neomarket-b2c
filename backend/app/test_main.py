@@ -177,13 +177,14 @@ def test_sku_without_stock_is_shown_as_unavailable():
     Если остаток 0, товар все равно должен открываться по прямой ссылке, 
     но поле has_stock должно быть false.
     """
+    # ID товара из твоего b2b_client.py с active_quantity = 0
     out_of_stock_id = "770e8400-e29b-41d4-a716-446655440097"
     response = client.get(f"/api/v1/catalog/products/{out_of_stock_id}")
     
     assert response.status_code == 200
     data = response.json()
     assert data["has_stock"] is False
-
+    # Проверяем доступность в SKU
     for sku in data["skus"]:
         assert sku["available_quantity"] == 0
 
@@ -330,3 +331,180 @@ def test_unknown_category_returns_404():
     assert response.status_code == 404
     data = response.json()
     assert data["code"] == "NOT_FOUND"
+
+
+# --- US-CART-01 Favorites Test Suite ---
+
+import base64
+import json
+
+def create_mock_jwt(user_id: str) -> str:
+    header = {"alg": "HS256", "typ": "JWT"}
+    payload = {"sub": user_id}
+    h_b64 = base64.urlsafe_b64encode(json.dumps(header).encode()).decode().rstrip("=")
+    p_b64 = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+    return f"Bearer {h_b64}.{p_b64}.mock-signature"
+
+
+def test_add_to_favorites_returns_201():
+    """
+    happy: add_to_favorites_returns_201
+    Покупатель добавляет допустимый товар в избранное впервые -> 201 Created.
+    """
+    from app.main import FAVORITES_DB
+    user_id = "a1111111-e29b-41d4-a716-446655440001"
+    product_id = "770e8400-e29b-41d4-a716-446655440001" # Crypto Whale Alerts (moderated, active)
+    token = create_mock_jwt(user_id)
+    
+    # Clean database state first
+    from uuid import UUID
+    user_uuid = UUID(user_id)
+    if user_uuid in FAVORITES_DB:
+        del FAVORITES_DB[user_uuid]
+
+    # Add to favorites
+    response = client.post(
+        f"/api/v1/favorites/{product_id}",
+        headers={"Authorization": token}
+    )
+    assert response.status_code == 201
+    data = response.json()
+    assert data["product_id"] == product_id
+    assert data["user_id"] == user_id
+    assert "added_at" in data
+    
+    # Retrieve favorites to verify it's there
+    get_res = client.get(
+        "/api/v1/favorites",
+        headers={"Authorization": token}
+    )
+    assert get_res.status_code == 200
+    get_data = get_res.json()
+    assert get_data["total_count"] == 1
+    assert get_data["items"][0]["id"] == product_id
+
+
+def test_repeat_add_returns_200_not_duplicate():
+    """
+    unhappy: repeat_add_returns_200_not_duplicate
+    Повторное добавление существующего товара в избранное -> 200 OK, не дублируется.
+    """
+    user_id = "a1111111-e29b-41d4-a716-446655440002"
+    product_id = "770e8400-e29b-41d4-a716-446655440001" # Valid modulated B2B product
+    token = create_mock_jwt(user_id)
+    
+    # First Addition -> 201
+    response1 = client.post(
+        f"/api/v1/favorites/{product_id}",
+        headers={"Authorization": token}
+    )
+    assert response1.status_code == 201
+    added_at_first = response1.json()["added_at"]
+    
+    # Second Addition -> 200
+    response2 = client.post(
+        f"/api/v1/favorites/{product_id}",
+        headers={"Authorization": token}
+    )
+    assert response2.status_code == 200
+    data2 = response2.json()
+    assert data2["added_at"] == added_at_first
+    
+    # Verify no duplication in listing
+    get_res = client.get(
+        "/api/v1/favorites",
+        headers={"Authorization": token}
+    )
+    assert get_res.status_code == 200
+    get_data = get_res.json()
+    assert get_data["total_count"] == 1
+    assert len(get_data["items"]) == 1
+
+
+def test_blocked_product_excluded_from_list():
+    """
+    unhappy: blocked_product_excluded_from_list
+    Товар, который был заблокирован/удален в B2B, автоматически исключается из выдачи GET /favorites.
+    """
+    user_id = "a1111111-e29b-41d4-a716-446655440003"
+    product_id_active = "770e8400-e29b-41d4-a716-446655440001" # Active Whale channel
+    product_id_draft = "770e8400-e29b-41d4-a716-446655440099" # Not moderated: status = "DRAFT"
+    
+    token = create_mock_jwt(user_id)
+    
+    # Try adding draft product to favorites -> 404 since it's not active/visible in available products or exists but blocked?
+    # Wait, our post endpoint checks "next((p for p in raw_products if p['id'] == product_id), None)".
+    # Does raw_products keep active/all products? Yes, b2b_client._products contains raw unchecked products.
+    # So we can add draft product, but GET /favorites will only show moderated products since it calls fetch_products.
+    
+    # Add active product -> 201
+    res_act = client.post(f"/api/v1/favorites/{product_id_active}", headers={"Authorization": token})
+    assert res_act.status_code == 201
+    
+    # Add draft product -> 201 (since it exists in _products database, but status: DRAFT)
+    res_draft = client.post(f"/api/v1/favorites/{product_id_draft}", headers={"Authorization": token})
+    assert res_draft.status_code == 201
+    
+    # Query favorites -> only active product should be in items!
+    get_res = client.get("/api/v1/favorites", headers={"Authorization": token})
+    assert get_res.status_code == 200
+    get_data = get_res.json()
+    
+    # Draft product must be completely excluded!
+    assert get_data["total_count"] == 1
+    assert get_data["items"][0]["id"] == product_id_active
+    
+    # Verify that if product_id_active is deleted, it is also excluded
+    from uuid import UUID
+    for prod in b2b_client._products:
+        if prod["id"] == UUID(product_id_active):
+            prod["deleted"] = True  # Simulated deletion
+            
+    try:
+        get_res_deleted = client.get("/api/v1/favorites", headers={"Authorization": token})
+        assert get_res_deleted.status_code == 200
+        assert get_res_deleted.json()["total_count"] == 0
+        assert len(get_res_deleted.json()["items"]) == 0
+    finally:
+        # Restore state
+        for prod in b2b_client._products:
+            if prod["id"] == UUID(product_id_active):
+                prod["deleted"] = False
+
+
+def test_user_id_from_query_is_ignored():
+    """
+    unhappy: user_id_from_query_is_ignored
+    Если передан user_id в query — игнорируется, берётся из JWT (предотвращение IDOR).
+    """
+    user_alice = "a1111111-e29b-41d4-a716-446655440004"
+    user_bob = "b1111111-e29b-41d4-a716-446655440005"
+    product_id = "770e8400-e29b-41d4-a716-446655440001"
+    
+    token_alice = create_mock_jwt(user_alice)
+    token_bob = create_mock_jwt(user_bob)
+    
+    # Alice adds product, but maliciously tries to pass user_id equal to Bob in query params
+    response = client.post(
+        f"/api/v1/favorites/{product_id}?user_id={user_bob}",
+        headers={"Authorization": token_alice}
+    )
+    assert response.status_code == 201
+    
+    # Check that the favorite was added for ALICE, not Bob!
+    # Alice GET with Bob query param -> returns Alice's favorites
+    get_alice = client.get(
+        f"/api/v1/favorites?user_id={user_bob}",
+        headers={"Authorization": token_alice}
+    )
+    assert get_alice.status_code == 200
+    assert get_alice.json()["total_count"] == 1
+    assert get_alice.json()["items"][0]["id"] == product_id
+    
+    # Bob GET with Alice/Bob queries -> should return Bob's empty favorites list!
+    get_bob = client.get(
+        f"/api/v1/favorites?user_id={user_alice}",
+        headers={"Authorization": token_bob}
+    )
+    assert get_bob.status_code == 200
+    assert get_bob.json()["total_count"] == 0

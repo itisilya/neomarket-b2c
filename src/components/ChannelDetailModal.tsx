@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { CatalogProductDetail, CatalogSku, CatalogProductCard } from "../types";
-import { X, ShieldCheck, ShoppingCart, Info, TrendingUp, DollarSign, Award } from "lucide-react";
+import { X, ShieldCheck, ShoppingCart, Info, TrendingUp, DollarSign, Award, Heart } from "lucide-react";
 
 interface ChannelDetailModalProps {
   productId: string;
@@ -9,6 +9,8 @@ interface ChannelDetailModalProps {
   onLoadProductDetail: (id: string) => Promise<CatalogProductDetail | null>;
   currentProduct: CatalogProductDetail;
   setCurrentProduct: (p: CatalogProductDetail) => void;
+  isFavorite?: boolean;
+  onToggleFavorite?: (id: string) => void;
 }
 
 export const ChannelDetailModal: React.FC<ChannelDetailModalProps> = ({
@@ -17,7 +19,9 @@ export const ChannelDetailModal: React.FC<ChannelDetailModalProps> = ({
   onAddToCart,
   onLoadProductDetail,
   currentProduct,
-  setCurrentProduct
+  setCurrentProduct,
+  isFavorite = false,
+  onToggleFavorite
 }) => {
   const [selectedSku, setSelectedSku] = useState<CatalogSku | null>(null);
   const [similarProducts, setSimilarProducts] = useState<CatalogProductCard[]>([]);
@@ -252,13 +256,26 @@ export const ChannelDetailModal: React.FC<ChannelDetailModalProps> = ({
                   </div>
 
                   <div className="flex flex-col gap-1.5 shrink-0 align-right items-end">
-                    <button
-                      onClick={handleCartClick}
-                      disabled={!selectedSku}
-                      className="flex items-center gap-2 rounded-2xl bg-white text-slate-950 px-6 py-3.5 font-sans text-sm font-extrabold transition-all duration-200 hover:bg-cyan-400 hover:text-slate-950 hover:accent-glow active:scale-95 disabled:bg-slate-700 disabled:text-slate-400 disabled:cursor-not-allowed"
-                    >
-                      <ShoppingCart className="h-4 w-4" /> В корзину B2C
-                    </button>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => onToggleFavorite?.(currentProduct.id)}
+                        className={`flex h-12 w-12 items-center justify-center rounded-2xl border transition-all duration-200 ${
+                          isFavorite 
+                            ? "bg-rose-950/80 text-rose-500 border-rose-900/50 hover:bg-rose-900/40 hover:text-rose-400" 
+                            : "bg-slate-900 text-slate-300 border-slate-800 hover:bg-slate-800 hover:text-rose-500"
+                        }`}
+                        title={isFavorite ? "Удалить из избранного" : "Добавить в избранное"}
+                      >
+                        <Heart className={`h-5 w-5 ${isFavorite ? "fill-rose-500" : ""}`} />
+                      </button>
+                      <button
+                        onClick={handleCartClick}
+                        disabled={!selectedSku}
+                        className="flex items-center gap-2 rounded-2xl bg-white text-slate-950 px-6 py-3.5 font-sans text-sm font-extrabold transition-all duration-200 hover:bg-cyan-400 hover:text-slate-950 hover:accent-glow active:scale-95 disabled:bg-slate-700 disabled:text-slate-400 disabled:cursor-not-allowed text-nowrap"
+                      >
+                        <ShoppingCart className="h-4 w-4" /> В корзину B2C
+                      </button>
+                    </div>
                     <span className="text-[9px] text-slate-500 uppercase tracking-wider">Безопасный Гарант сделок</span>
                   </div>
                 </div>

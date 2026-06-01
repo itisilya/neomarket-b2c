@@ -90,3 +90,16 @@ export interface DevApiLog {
   duration: string;
   timestamp: string;
 }
+
+export interface FavoriteItem extends CatalogProductCard {
+  added_at: string;
+  skus: CatalogSku[];
+}
+
+export interface FavoritesResponse {
+  items: FavoriteItem[];
+  total_count: number;
+  limit: number;
+  offset: number;
+}
+
