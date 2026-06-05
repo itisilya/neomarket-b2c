@@ -162,3 +162,19 @@ class FavoritesResponse(BaseModel):
     limit: int
     offset: int
 
+
+class SubscriptionRequest(BaseModel):
+    notify_on: List[str]
+
+
+class SubscriptionResponse(BaseModel):
+    id: UUID
+    product_id: UUID
+    user_id: UUID
+    notify_on: List[str]
+    created_at: str
+
+
+class SubscriptionsListResponse(BaseModel):
+    items: List[SubscriptionResponse]
+

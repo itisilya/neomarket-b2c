@@ -68,6 +68,42 @@ export default function App() {
   const [favoriteItems, setFavoriteItems] = useState<FavoriteItem[]>([]);
   const [favoritesLoading, setFavoritesLoading] = useState(false);
   const [checkoutFinished, setCheckoutFinished] = useState(false);
+  const [subscriptions, setSubscriptions] = useState<string[]>([]);
+
+  const handleToggleSubscription = async (productId: string) => {
+    const isSub = subscriptions.includes(productId);
+    try {
+      if (isSub) {
+        // Remove subscription -> DELETE /api/v1/favorites/{productId}/subscribe
+        const res = await fetch(`/api/v1/favorites/${productId}/subscribe`, {
+          method: "DELETE",
+          headers: {
+            "Authorization": MOCK_JWT
+          }
+        });
+        if (res.ok || res.status === 204) {
+          setSubscriptions(prev => prev.filter(id => id !== productId));
+        }
+      } else {
+        // Add subscription -> POST /api/v1/favorites/{productId}/subscribe
+        const res = await fetch(`/api/v1/favorites/${productId}/subscribe`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": MOCK_JWT
+          },
+          body: JSON.stringify({
+            notify_on: ["PRICE_DROP", "BACK_IN_STOCK"]
+          })
+        });
+        if (res.ok || res.status === 201) {
+          setSubscriptions(prev => [...prev, productId]);
+        }
+      }
+    } catch (err) {
+      console.error("Failed in subscription transaction request:", err);
+    }
+  };
 
   const loadFavorites = async () => {
     setFavoritesLoading(true);
@@ -89,8 +125,27 @@ export default function App() {
     }
   };
 
+  const loadSubscriptions = async () => {
+    try {
+      const res = await fetch("/api/v1/subscribe", {
+        headers: {
+          "Authorization": MOCK_JWT
+        }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data && Array.isArray(data.items)) {
+          setSubscriptions(data.items.map((item: any) => item.product_id));
+        }
+      }
+    } catch (err) {
+      console.error("Failed to load subscriptions from B2C database:", err);
+    }
+  };
+
   useEffect(() => {
     loadFavorites();
+    loadSubscriptions();
   }, []);
 
   const handleToggleFavorite = async (productId: string, e?: React.MouseEvent) => {
@@ -519,7 +574,7 @@ export default function App() {
             <div className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-slate-900 via-slate-950 to-slate-950 p-6 md:p-8 text-white border border-slate-800 shadow-xl">
               <div className="absolute top-0 right-0 h-full w-48 bg-radial-at-t from-rose-500/10 via-transparent to-transparent pointer-events-none" />
               <div className="max-w-xl">
-                <h1 className="mt-3.5 font-sans text-xl md:text-2xl font-black text-white leading-tight">
+                <h1 className="font-sans text-xl md:text-2xl font-black text-white leading-tight">
                   Избранные Telegram-каналы
                 </h1>
               </div>
@@ -672,6 +727,8 @@ export default function App() {
           onLoadProductDetail={handleLoadProductDetail}
           isFavorite={favorites.includes(selectedProductId)}
           onToggleFavorite={handleToggleFavorite}
+          isSubscribed={subscriptions.includes(selectedProductId)}
+          onToggleSubscription={handleToggleSubscription}
         />
       )}
 

@@ -508,3 +508,110 @@ def test_user_id_from_query_is_ignored():
     )
     assert get_bob.status_code == 200
     assert get_bob.json()["total_count"] == 0
+
+
+def test_subscribe_returns_201_with_notify_on():
+    """
+    happy: subscribe_returns_201_with_notify_on
+    """
+    from app.main import SUBSCRIPTIONS_DB
+    user_id = "c1111111-e29b-41d4-a716-446655440101"
+    product_id = "770e8400-e29b-41d4-a716-446655440001"
+    token = create_mock_jwt(user_id)
+
+    # Clean state
+    from uuid import UUID
+    user_uuid = UUID(user_id)
+    if user_uuid in SUBSCRIPTIONS_DB:
+        del SUBSCRIPTIONS_DB[user_uuid]
+
+    # Create subscription
+    response = client.post(
+        f"/api/v1/favorites/{product_id}/subscribe",
+        json={"notify_on": ["PRICE_DROP", "BACK_IN_STOCK"]},
+        headers={"Authorization": token}
+    )
+    assert response.status_code == 201
+    data = response.json()
+    assert data["product_id"] == product_id
+    assert data["user_id"] == user_id
+    assert data["notify_on"] == ["PRICE_DROP", "BACK_IN_STOCK"]
+    assert "id" in data
+    assert "created_at" in data
+
+    # Clean up / unsubscribe
+    del_res = client.delete(
+        f"/api/v1/favorites/{product_id}/subscribe",
+        headers={"Authorization": token}
+    )
+    assert del_res.status_code == 204
+
+
+def test_duplicate_subscription_returns_409():
+    """
+    unhappy: duplicate_subscription_returns_409
+    """
+    user_id = "c1111111-e29b-41d4-a716-446655440102"
+    product_id = "770e8400-e29b-41d4-a716-446655440001"
+    token = create_mock_jwt(user_id)
+
+    # Subscribe once -> 201
+    response1 = client.post(
+        f"/api/v1/favorites/{product_id}/subscribe",
+        json={"notify_on": ["PRICE_DROP"]},
+        headers={"Authorization": token}
+    )
+    assert response1.status_code == 201
+
+    # Subscribe twice -> 409
+    response2 = client.post(
+        f"/api/v1/favorites/{product_id}/subscribe",
+        json={"notify_on": ["BACK_IN_STOCK"]},
+        headers={"Authorization": token}
+    )
+    assert response2.status_code == 409
+    assert response2.json()["code"] == "DUPLICATE_SUBSCRIPTION"
+
+
+def test_invalid_notify_on_returns_400():
+    """
+    unhappy: invalid_notify_on_returns_400
+    """
+    user_id = "c1111111-e29b-41d4-a716-446655440103"
+    product_id = "770e8400-e29b-41d4-a716-446655440001"
+    token = create_mock_jwt(user_id)
+
+    # Empty notify_on -> 400
+    response1 = client.post(
+        f"/api/v1/favorites/{product_id}/subscribe",
+        json={"notify_on": []},
+        headers={"Authorization": token}
+    )
+    assert response1.status_code == 400
+    assert response1.json()["code"] == "INVALID_REQUEST"
+
+    # Invalid list value -> 400
+    response2 = client.post(
+        f"/api/v1/favorites/{product_id}/subscribe",
+        json={"notify_on": ["invalid_event_type"]},
+        headers={"Authorization": token}
+    )
+    assert response2.status_code == 400
+    assert response2.json()["code"] == "INVALID_REQUEST"
+
+
+def test_subscribe_to_unknown_product_returns_404():
+    """
+    unhappy: subscribe_to_unknown_product_returns_404
+    """
+    user_id = "c1111111-e29b-41d4-a716-446655440104"
+    unknown_id = "00000000-0000-0000-0000-000000000000"
+    token = create_mock_jwt(user_id)
+
+    response = client.post(
+        f"/api/v1/favorites/{unknown_id}/subscribe",
+        json={"notify_on": ["PRICE_DROP"]},
+        headers={"Authorization": token}
+    )
+    assert response.status_code == 404
+    assert response.json()["code"] == "NOT_FOUND"

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { CatalogProductDetail, CatalogSku, CatalogProductCard } from "../types";
-import { X, ShieldCheck, ShoppingCart, Info, TrendingUp, DollarSign, Award, Heart } from "lucide-react";
+import { X, ShieldCheck, ShoppingCart, Info, TrendingUp, DollarSign, Award, Heart, Bell } from "lucide-react";
 
 interface ChannelDetailModalProps {
   productId: string;
@@ -11,6 +11,8 @@ interface ChannelDetailModalProps {
   setCurrentProduct: (p: CatalogProductDetail) => void;
   isFavorite?: boolean;
   onToggleFavorite?: (id: string) => void;
+  isSubscribed?: boolean;
+  onToggleSubscription?: (id: string) => void;
 }
 
 export const ChannelDetailModal: React.FC<ChannelDetailModalProps> = ({
@@ -21,7 +23,9 @@ export const ChannelDetailModal: React.FC<ChannelDetailModalProps> = ({
   currentProduct,
   setCurrentProduct,
   isFavorite = false,
-  onToggleFavorite
+  onToggleFavorite,
+  isSubscribed = false,
+  onToggleSubscription
 }) => {
   const [selectedSku, setSelectedSku] = useState<CatalogSku | null>(null);
   const [similarProducts, setSimilarProducts] = useState<CatalogProductCard[]>([]);
@@ -269,6 +273,17 @@ export const ChannelDetailModal: React.FC<ChannelDetailModalProps> = ({
                         <Heart className={`h-5 w-5 ${isFavorite ? "fill-rose-500" : ""}`} />
                       </button>
                       <button
+                        onClick={() => onToggleSubscription?.(currentProduct.id)}
+                        className={`flex h-12 w-12 items-center justify-center rounded-2xl border transition-all duration-200 ${
+                          isSubscribed 
+                            ? "bg-amber-950/80 text-amber-400 border-amber-900/50 hover:bg-amber-900/40 hover:text-amber-300" 
+                            : "bg-slate-900 text-slate-300 border-slate-800 hover:bg-slate-800 hover:text-amber-400"
+                        }`}
+                        title={isSubscribed ? "Вы подписаны на обновления" : "Подписаться на уведомления"}
+                      >
+                        <Bell className={`h-5 w-5 ${isSubscribed ? "fill-amber-400 text-amber-950" : ""}`} />
+                      </button>
+                      <button
                         onClick={handleCartClick}
                         disabled={!selectedSku}
                         className="flex items-center gap-2 rounded-2xl bg-white text-slate-950 px-6 py-3.5 font-sans text-sm font-extrabold transition-all duration-200 hover:bg-cyan-400 hover:text-slate-950 hover:accent-glow active:scale-95 disabled:bg-slate-700 disabled:text-slate-400 disabled:cursor-not-allowed text-nowrap"
@@ -276,7 +291,14 @@ export const ChannelDetailModal: React.FC<ChannelDetailModalProps> = ({
                         <ShoppingCart className="h-4 w-4" /> В корзину B2C
                       </button>
                     </div>
-                    <span className="text-[9px] text-slate-500 uppercase tracking-wider">Безопасный Гарант сделок</span>
+                    <div className="flex flex-col items-end gap-0.5">
+                      {isSubscribed && (
+                        <span className="text-[10px] text-amber-400 font-bold tracking-wide">
+                          🔔 Подписка на обновление цены/наличия активна
+                        </span>
+                      )}
+                      <span className="text-[9px] text-slate-500 uppercase tracking-wider">Безопасный Гарант сделок</span>
+                    </div>
                   </div>
                 </div>
 
