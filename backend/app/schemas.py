@@ -116,18 +116,12 @@ class CategoryDetailResponse(BaseModel):
     is_active: bool
     created_at: str
 
-class CategoryTreeResponse(BaseModel):
-    items: List[CategoryTreeNode]
-
 class FlatCategoryItem(BaseModel):
     id: UUID
     name: str
     parent_id: Optional[UUID] = None
     level: int
     path: List[str]
-
-class FlatCategoriesResponse(BaseModel):
-    items: List[FlatCategoryItem]
 
 
 class FavoriteResponse(BaseModel):
