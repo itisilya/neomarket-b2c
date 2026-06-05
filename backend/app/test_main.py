@@ -244,10 +244,10 @@ def test_category_tree_returns_nested_structure():
     response = client.get("/api/v1/catalog/categories/tree")
     assert response.status_code == 200
     data = response.json()
-    assert "items" in data
-    assert len(data["items"]) > 0
+    assert isinstance(data, list)
+    assert len(data) > 0
     # Check structure: each category should have level, path, children, id, name
-    for item in data["items"]:
+    for item in data:
         assert "id" in item
         assert "name" in item
         assert "level" in item
@@ -615,3 +615,6 @@ def test_subscribe_to_unknown_product_returns_404():
     )
     assert response.status_code == 404
     assert response.json()["code"] == "NOT_FOUND"
+
+
+

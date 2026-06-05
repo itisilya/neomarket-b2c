@@ -9,7 +9,7 @@ from app.schemas import (
     CategoryRef, CatalogProductCard, PaginatedCatalogProducts,
     FacetsResponse, FacetGroup, FacetItem, CatalogProductDetail,
     BreadcrumbItem, BreadcrumbsResponse, CategoryDetailResponse,
-    CategoryTreeResponse, FlatCategoriesResponse,
+    CategoryTreeNode, FlatCategoryItem,
     FavoriteResponse, FavoritesResponse,
     SubscriptionRequest, SubscriptionResponse, SubscriptionsListResponse
 )
@@ -692,8 +692,9 @@ def get_breadcrumbs(
     )
 
 
-@app.get("/api/v1/catalog/categories/tree", response_model=CategoryTreeResponse)
-@app.get("/api/v1/categories/tree", response_model=CategoryTreeResponse)
+@app.get("/api/v1/catalog/categories/tree", response_model=List[CategoryTreeNode])
+@app.get("/api/v1/categories/tree", response_model=List[CategoryTreeNode])
+@app.get("/categories/tree", response_model=List[CategoryTreeNode])
 def get_categories_tree(
     x_service_key: Optional[str] = Header(None, alias="X-Service-Key"),
     x_simulate_b2b_outage: Optional[str] = Header(None, alias="X-Simulate-B2B-Outage")
@@ -735,11 +736,12 @@ def get_categories_tree(
         return nodes
 
     tree = build_tree(None)
-    return {"items": tree}
+    return tree
 
 
-@app.get("/api/v1/catalog/categories", response_model=FlatCategoriesResponse)
-@app.get("/api/v1/categories", response_model=FlatCategoriesResponse)
+@app.get("/api/v1/catalog/categories", response_model=List[FlatCategoryItem])
+@app.get("/api/v1/categories", response_model=List[FlatCategoryItem])
+@app.get("/categories", response_model=List[FlatCategoryItem])
 def get_flat_categories(
     x_service_key: Optional[str] = Header(None, alias="X-Service-Key"),
     x_simulate_b2b_outage: Optional[str] = Header(None, alias="X-Simulate-B2B-Outage")
@@ -775,7 +777,7 @@ def get_flat_categories(
             "level": len(trail) - 1,
             "path": [t["name"] for t in trail]
         })
-    return {"items": refs}
+    return refs
 
 
 @app.get("/api/v1/catalog/categories/{id}", response_model=CategoryDetailResponse)
