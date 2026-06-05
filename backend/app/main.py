@@ -10,7 +10,8 @@ from app.schemas import (
     FacetsResponse, FacetGroup, FacetItem, CatalogProductDetail,
     BreadcrumbItem, BreadcrumbsResponse, CategoryDetailResponse,
     CategoryTreeResponse, FlatCategoriesResponse,
-    FavoriteResponse, FavoritesResponse
+    FavoriteResponse, FavoritesResponse,
+    SubscriptionRequest, SubscriptionResponse, SubscriptionsListResponse
 )
 from app.b2b_client import B2BClient
 
@@ -847,6 +848,10 @@ def get_category_details(
 # Key: user_id (UUID), Value: List of Dict containing product_id (UUID) and added_at (str)
 FAVORITES_DB: Dict[UUID, List[Dict[str, Any]]] = {}
 
+# Simulated B2C database for subscriptions
+# Key: user_id (UUID), Value: List of Dict containing id (UUID), product_id (UUID), notify_on (List[str]), and created_at (str)
+SUBSCRIPTIONS_DB: Dict[UUID, List[Dict[str, Any]]] = {}
+
 def decode_jwt(token: str) -> dict:
     import base64
     import json
@@ -1104,4 +1109,120 @@ def get_favorites(
         "limit": limit,
         "offset": offset
     }
+
+
+def validate_notify_on(notify_on: Any):
+    if not notify_on:  # empty or None
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "INVALID_REQUEST", "message": "notify_on list must not be empty"}
+        )
+    if not isinstance(notify_on, list):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "INVALID_REQUEST", "message": "notify_on must be a list of strings"}
+        )
+    valid_events = {"PRICE_DROP", "BACK_IN_STOCK"}
+    for item in notify_on:
+        if not item or item not in valid_events:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "INVALID_REQUEST", "message": f"Invalid notify_on event: '{item}'. Allowed: {list(valid_events)}"}
+            )
+
+
+@app.get("/api/v1/subscribe", response_model=SubscriptionsListResponse)
+@app.get("/subscribe", response_model=SubscriptionsListResponse)
+def get_subscriptions(
+    authorization: Optional[str] = Header(None)
+):
+    curr_user_id = get_user_id_from_auth(authorization)
+    user_subs = SUBSCRIPTIONS_DB.get(curr_user_id, [])
+    return {"items": user_subs}
+
+
+@app.post("/api/v1/favorites/{product_id}/subscribe", status_code=status.HTTP_201_CREATED, response_model=SubscriptionResponse)
+@app.post("/api/v1/subscribe/{product_id}", status_code=status.HTTP_201_CREATED, response_model=SubscriptionResponse)
+def create_subscription(
+    product_id: UUID,
+    payload: SubscriptionRequest,
+    authorization: Optional[str] = Header(None)
+):
+    # 1. JWT auth and extraction
+    curr_user_id = get_user_id_from_auth(authorization)
+    
+    # 2. Validate notify_on
+    validate_notify_on(payload.notify_on)
+    
+    # 3. Check if product exists in B2B database
+    try:
+        raw_products = b2b_client._products
+    except Exception as e:
+         raise HTTPException(
+             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+             detail={"code": "B2B_UNAVAILABLE", "message": f"B2B service error: {str(e)}"}
+         )
+         
+    product = next((p for p in raw_products if p["id"] == product_id), None)
+    if not product:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "NOT_FOUND", "message": "Product not found"}
+        )
+        
+    # 4. Check for duplicate subscription -> 409
+    if curr_user_id not in SUBSCRIPTIONS_DB:
+        SUBSCRIPTIONS_DB[curr_user_id] = []
+        
+    user_subs = SUBSCRIPTIONS_DB[curr_user_id]
+    existing = next((s for s in user_subs if s["product_id"] == product_id), None)
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "DUPLICATE_SUBSCRIPTION", "message": "Subscription for this product already exists"}
+        )
+        
+    # 5. Create subscription
+    import uuid
+    from datetime import datetime
+    sub_id = uuid.uuid4()
+    now_str = datetime.utcnow().isoformat() + "Z"
+    
+    new_sub = {
+        "id": sub_id,
+        "product_id": product_id,
+        "user_id": curr_user_id,
+        "notify_on": payload.notify_on,
+        "created_at": now_str
+    }
+    user_subs.append(new_sub)
+    return new_sub
+
+
+@app.delete("/api/v1/favorites/{product_id}/subscribe", status_code=status.HTTP_204_NO_CONTENT)
+@app.delete("/api/v1/subscribe/{product_id}", status_code=status.HTTP_204_NO_CONTENT)
+@app.delete("/subscribe/{product_id}", status_code=status.HTTP_204_NO_CONTENT)
+@app.delete("/api/v1/subscribe", status_code=status.HTTP_204_NO_CONTENT)
+@app.delete("/subscribe", status_code=status.HTTP_204_NO_CONTENT)
+def unsubscribe_product(
+    product_id: Optional[UUID] = None,
+    product_id_query: Optional[UUID] = Query(None, alias="product_id"),
+    authorization: Optional[str] = Header(None)
+):
+    # JWT auth and extraction
+    curr_user_id = get_user_id_from_auth(authorization)
+    
+    resolved_product_id = product_id or product_id_query
+    if not resolved_product_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "INVALID_REQUEST", "message": "product_id is required"}
+        )
+        
+    if curr_user_id in SUBSCRIPTIONS_DB:
+        SUBSCRIPTIONS_DB[curr_user_id] = [
+            s for s in SUBSCRIPTIONS_DB[curr_user_id] if s["product_id"] != resolved_product_id
+        ]
+        
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
