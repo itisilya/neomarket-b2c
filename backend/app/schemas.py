@@ -129,3 +129,36 @@ class FlatCategoryItem(BaseModel):
 class FlatCategoriesResponse(BaseModel):
     items: List[FlatCategoryItem]
 
+
+class FavoriteResponse(BaseModel):
+    product_id: UUID
+    user_id: UUID
+    added_at: str
+
+
+class FavoriteItem(BaseModel):
+    id: UUID
+    name: str
+    slug: str
+    category: Optional[CategoryRef] = None
+    min_price: int
+    old_price: Optional[int] = None
+    has_stock: bool
+    rating: Optional[float] = None
+    reviews_count: int = 0
+    subscribers: int
+    monthly_income: int
+    er: float
+    verified: bool
+    images: List[ImageRef]
+    seller: Optional[Dict[str, Any]] = None
+    skus: List[CatalogSku] = []
+    added_at: str
+
+
+class FavoritesResponse(BaseModel):
+    items: List[FavoriteItem]
+    total_count: int
+    limit: int
+    offset: int
+

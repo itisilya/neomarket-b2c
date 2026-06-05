@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { CatalogProductCard, CatalogProductDetail, CategoryRef, CatalogSku, FacetsResponse, BreadcrumbItem } from "./types";
+import { CatalogProductCard, CatalogProductDetail, CategoryRef, CatalogSku, FacetsResponse, BreadcrumbItem, FavoriteItem, FavoritesResponse } from "./types";
 import { SidebarFilters } from "./components/SidebarFilters";
 import { ChannelCard } from "./components/ChannelCard";
 import { ChannelDetailModal } from "./components/ChannelDetailModal";
@@ -60,8 +60,73 @@ export default function App() {
   // Simulated Cart and Favorites states
   const [cart, setCart] = useState<Array<{ sku: CatalogSku; productName: string; quantity: number }>>([]);
   const [isCartOpen, setIsCartOpen] = useState(false);
+  
+  // Real B2C Favorites Database Integration
+  const MOCK_JWT = "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhMTExMTExMS1lMjliLTQxZDQtYTcxNi00NDY2NTU0NDAwMDEifQ.mock-signature";
+  const [activeTab, setActiveTab] = useState<"catalog" | "favorites">("catalog");
   const [favorites, setFavorites] = useState<string[]>([]);
+  const [favoriteItems, setFavoriteItems] = useState<FavoriteItem[]>([]);
+  const [favoritesLoading, setFavoritesLoading] = useState(false);
   const [checkoutFinished, setCheckoutFinished] = useState(false);
+
+  const loadFavorites = async () => {
+    setFavoritesLoading(true);
+    try {
+      const res = await fetch("/api/v1/favorites", {
+        headers: {
+          "Authorization": MOCK_JWT
+        }
+      });
+      if (res.ok) {
+        const data: FavoritesResponse = await res.json();
+        setFavoriteItems(data.items);
+        setFavorites(data.items.map(item => item.id));
+      }
+    } catch (err) {
+      console.error("Failed to load favorites from B2C database:", err);
+    } finally {
+      setFavoritesLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadFavorites();
+  }, []);
+
+  const handleToggleFavorite = async (productId: string, e?: React.MouseEvent) => {
+    if (e) {
+      e.stopPropagation();
+    }
+    const isFav = favorites.includes(productId);
+    try {
+      if (isFav) {
+        // Remove Favorite -> DELETE /api/v1/favorites/{productId}
+        const res = await fetch(`/api/v1/favorites/${productId}`, {
+          method: "DELETE",
+          headers: {
+            "Authorization": MOCK_JWT
+          }
+        });
+        if (res.ok || res.status === 204) {
+          setFavorites(prev => prev.filter(id => id !== productId));
+          setFavoriteItems(prev => prev.filter(item => item.id !== productId));
+        }
+      } else {
+        // Add Favorite -> POST /api/v1/favorites/{productId}
+        const res = await fetch(`/api/v1/favorites/${productId}`, {
+          method: "POST",
+          headers: {
+            "Authorization": MOCK_JWT
+          }
+        });
+        if (res.ok || res.status === 201) {
+          await loadFavorites();
+        }
+      }
+    } catch (err) {
+      console.error("Failed in favorites transaction request:", err);
+    }
+  };
 
   // Sync Products and Facets on filter updates
   useEffect(() => {
@@ -257,6 +322,35 @@ export default function App() {
             </div>
           </div>
 
+          {/* Navigation Tabs */}
+          <div className="flex items-center gap-1 bg-slate-900/90 border border-slate-800/80 p-1 rounded-2xl shadow-inner shadow-black/40">
+            <button
+              onClick={() => setActiveTab("catalog")}
+              className={`flex items-center gap-1.5 px-35 py-1.5 rounded-xl text-xs font-black uppercase tracking-wider transition-all duration-150 ${
+                activeTab === "catalog"
+                  ? "bg-slate-800/95 text-white border border-slate-750 shadow-md shadow-black/50"
+                  : "text-slate-400 hover:text-white"
+              }`}
+            >
+              <BookOpen className="h-3.5 w-3.5 text-cyan-400" /> Каталог
+            </button>
+            <button
+              onClick={() => setActiveTab("favorites")}
+              className={`flex items-center gap-1.5 px-35 py-1.5 rounded-xl text-xs font-black uppercase tracking-wider transition-all duration-150 relative ${
+                activeTab === "favorites"
+                  ? "bg-slate-800/95 text-white border border-slate-750 shadow-md shadow-black/50"
+                  : "text-slate-400 hover:text-white"
+              }`}
+            >
+              <Heart className={`h-3.5 w-3.5 ${activeTab === "favorites" || favorites.length > 0 ? "text-rose-500 fill-rose-500" : "text-slate-400"}`} /> Избранное
+              {favorites.length > 0 && (
+                <span className="flex h-4.5 min-w-[18px] items-center justify-center rounded-full bg-rose-500/20 text-rose-400 text-[9px] font-black font-mono px-1">
+                  {favorites.length}
+                </span>
+              )}
+            </button>
+          </div>
+
           {/* Cart & Status Ribbon */}
           <div className="flex items-center gap-4">
             <button
@@ -278,142 +372,204 @@ export default function App() {
       {/* App Body Wrapper */}
       <main className="mx-auto mt-8 max-w-7xl px-4 sm:px-6">
 
-        {/* Catalog Tab View */}
-        <div className="grid grid-cols-1 gap-8 lg:grid-cols-4">
-            
-            {/* Left Hand: Filter Columns */}
-            <div className="lg:col-span-1 space-y-6">
-              <SidebarFilters
-                categories={categories}
-                selectedCategoryId={selectedCategoryId}
-                onSelectCategory={setSelectedCategoryId}
-                priceMin={priceMin}
-                priceMax={priceMax}
-                setPriceMin={setPriceMin}
-                setPriceMax={setPriceMax}
-                verifiedOnly={verifiedOnly}
-                setVerifiedOnly={setVerifiedOnly}
-                facets={facets}
-                onReset={handleResetFilters}
-              />
-            </div>
-
-            {/* Right Hand: Catalog Grid, Search, and Tools */}
-            <div className="lg:col-span-3 space-y-6">
+        {activeTab === "catalog" ? (
+          /* Catalog Tab View */
+          <div className="grid grid-cols-1 gap-8 lg:grid-cols-4">
               
-              {/* Header Promo Banner */}
-              <div className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-slate-900 via-slate-950 to-slate-950 p-6 md:p-8 text-white border border-slate-800 shadow-xl">
-                <div className="absolute top-0 right-0 h-full w-48 bg-radial-at-t from-cyan-500/15 via-transparent to-transparent pointer-events-none" />
-                <div className="max-w-xl">
-                  <span className="text-[10px] font-bold uppercase tracking-widest text-cyan-400 bg-cyan-950/80 px-2 py-1 rounded inline-block border border-cyan-900/50">Портал Покупки Каналов</span>
-                  <h1 className="mt-3.5 font-sans text-xl md:text-2xl font-black text-white leading-tight">
-                    Инвестируйте в готовый медиабизнес безопасно
-                  </h1>
-                  <p className="mt-2 text-xs text-slate-350 leading-relaxed">
-                    Все выставленные Telegram-каналы прошли полную модерацию и аудит вовлеченности (ER) нашими кураторами. Простая сделка "под ключ" через Безопасный Гарант.
-                  </p>
-                </div>
+              {/* Left Hand: Filter Columns */}
+              <div className="lg:col-span-1 space-y-6">
+                <SidebarFilters
+                  categories={categories}
+                  selectedCategoryId={selectedCategoryId}
+                  onSelectCategory={setSelectedCategoryId}
+                  priceMin={priceMin}
+                  priceMax={priceMax}
+                  setPriceMin={setPriceMin}
+                  setPriceMax={setPriceMax}
+                  verifiedOnly={verifiedOnly}
+                  setVerifiedOnly={setVerifiedOnly}
+                  facets={facets}
+                  onReset={handleResetFilters}
+                />
               </div>
 
-              {/* Dynamic Search Box & Sort Selection */}
-              <div className="flex flex-col gap-3 rounded-2xl border border-slate-800 bg-slate-900/40 p-4 shadow-lg glass sm:flex-row sm:items-center sm:justify-between">
+              {/* Right Hand: Catalog Grid, Search, and Tools */}
+              <div className="lg:col-span-3 space-y-6">
                 
-                {/* Text search form */}
-                <div className="relative flex-1 max-w-md">
-                  <Search className="absolute top-3 left-3.5 h-4 w-4 text-cyan-400" />
-                  <input
-                    type="text"
-                    value={searchQuery}
-                    placeholder="Поиск по названию или описанию..."
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    className="w-full rounded-xl border border-slate-800 bg-slate-950 py-2.5 pr-4 pl-10 text-xs font-semibold text-white placeholder:text-slate-500 focus:border-cyan-405 focus:bg-slate-950 focus:outline-none transition-all"
-                  />
-                  {searchError && (
-                    <span className="absolute left-1 -bottom-5 text-[10px] font-bold text-rose-450 font-mono">
-                      {searchError}
-                    </span>
-                  )}
+                {/* Header Promo Banner */}
+                <div className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-slate-900 via-slate-950 to-slate-950 p-6 md:p-8 text-white border border-slate-800 shadow-xl">
+                  <div className="absolute top-0 right-0 h-full w-48 bg-radial-at-t from-cyan-500/15 via-transparent to-transparent pointer-events-none" />
+                  <div className="max-w-xl">
+                    <span className="text-[10px] font-bold uppercase tracking-widest text-cyan-400 bg-cyan-950/80 px-2 py-1 rounded inline-block border border-cyan-900/50">Портал Покупки Каналов</span>
+                    <h1 className="mt-3.5 font-sans text-xl md:text-2xl font-black text-white leading-tight">
+                      Инвестируйте в готовый медиабизнес безопасно
+                    </h1>
+                    <p className="mt-2 text-xs text-slate-350 leading-relaxed">
+                      Все выставленные Telegram-каналы прошли полную модерацию и аудит вовлеченности (ER) нашими кураторами. Простая сделка "под ключ" через Безопасный Гарант.
+                    </p>
+                  </div>
                 </div>
 
-                {/* Sort selection drop down */}
-                <div className="flex items-center gap-3 self-baseline sm:self-auto">
-                  <span className="text-xs font-bold text-slate-400 uppercase tracking-widest">Сортировать:</span>
-                  <select
-                    value={sortOption}
-                    onChange={(e) => setSortOption(e.target.value)}
-                    className="rounded-xl border border-slate-800 bg-slate-950 px-3 py-2 text-xs font-semibold text-slate-200 focus:outline-none focus:ring-1 focus:ring-cyan-400 cursor-pointer"
-                  >
-                    <option value="popularity">Популярность (Подписчики)</option>
-                    <option value="rating">Высокий рейтинг</option>
-                    <option value="price_asc">Цена по возрастанию</option>
-                    <option value="price_desc">Цена по убыванию</option>
-                    <option value="new">Сначала новые</option>
-                  </select>
-                </div>
-
-              </div>
-
-              {/* Category Breadcrumbs chain */}
-              {breadcrumbs.length > 0 && (
-                <div className="flex flex-wrap items-center gap-1.5 rounded-xl bg-cyan-950/20 px-4 py-2 text-[11px] text-cyan-400 font-semibold border border-cyan-900/40">
-                  <span className="text-cyan-400/80">Навигация:</span>
-                  <span>Все категории</span>
-                  {breadcrumbs.map((b) => (
-                    <React.Fragment key={b.id}>
-                      <ChevronRight className="h-3 w-3 text-cyan-500" />
-                      <span className={b.is_current ? "text-white font-extrabold" : "text-cyan-400"}>
-                        {b.name}
+                {/* Dynamic Search Box & Sort Selection */}
+                <div className="flex flex-col gap-3 rounded-2xl border border-slate-800 bg-slate-900/40 p-4 shadow-lg glass sm:flex-row sm:items-center sm:justify-between">
+                  
+                  {/* Text search form */}
+                  <div className="relative flex-1 max-w-md">
+                    <Search className="absolute top-3 left-3.5 h-4 w-4 text-cyan-400" />
+                    <input
+                      type="text"
+                      value={searchQuery}
+                      placeholder="Поиск по названию или описанию..."
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      className="w-full rounded-xl border border-slate-800 bg-slate-950 py-2.5 pr-4 pl-10 text-xs font-semibold text-white placeholder:text-slate-500 focus:border-cyan-405 focus:bg-slate-950 focus:outline-none transition-all"
+                    />
+                    {searchError && (
+                      <span className="absolute left-1 -bottom-5 text-[10px] font-bold text-rose-450 font-mono">
+                        {searchError}
                       </span>
-                    </React.Fragment>
-                  ))}
-                </div>
-              )}
-
-              {/* Main Products Grid Column */}
-              {loading ? (
-                <div className="flex flex-col items-center justify-center py-20">
-                  <div className="h-8 w-8 animate-spin rounded-full border-2 border-cyan-400 border-t-transparent" />
-                  <span className="mt-4 text-xs font-semibold text-slate-450 font-mono">Запрос товаров от B2B роутера...</span>
-                </div>
-              ) : products.length === 0 ? (
-                <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-slate-800 bg-slate-900/20 py-16 px-4 text-center">
-                  <div className="flex h-12 w-12 items-center justify-center rounded-full bg-slate-900 border border-slate-800 text-slate-400">
-                    <Search className="h-6 w-6" />
-                  </div>
-                  <h3 className="mt-4 font-sans text-sm font-bold text-white">Увы, совпадений нет</h3>
-                  <p className="mt-1 text-xs text-slate-500 max-w-sm leading-normal">
-                    Мы не нашли каналов под выбранные ценовые ограничения или фильтры. Попробуйте сбросить параметры.
-                  </p>
-                  <button
-                    onClick={handleResetFilters}
-                    className="mt-4 rounded-xl bg-slate-900 text-slate-300 border border-slate-800 px-4 py-2 text-xs font-bold hover:bg-slate-800 transition-colors"
-                  >
-                    Сбросить все фильтры
-                  </button>
-                </div>
-              ) : (
-                <div className="space-y-4">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] font-bold text-slate-450 uppercase tracking-widest font-mono">
-                      Найдено каналов: {totalCount}
-                    </span>
+                    )}
                   </div>
 
-                  <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
-                    {products.map((p) => (
-                      <ChannelCard
-                        key={p.id}
-                        channel={p}
-                        onClick={() => handleSelectProduct(p.id)}
-                      />
+                  {/* Sort selection drop down */}
+                  <div className="flex items-center gap-3 self-baseline sm:self-auto">
+                    <span className="text-xs font-bold text-slate-400 uppercase tracking-widest">Сортировать:</span>
+                    <select
+                      value={sortOption}
+                      onChange={(e) => setSortOption(e.target.value)}
+                      className="rounded-xl border border-slate-800 bg-slate-950 px-3 py-2 text-xs font-semibold text-slate-200 focus:outline-none focus:ring-1 focus:ring-cyan-400 cursor-pointer"
+                    >
+                      <option value="popularity">Популярность (Подписчики)</option>
+                      <option value="rating">Высокий рейтинг</option>
+                      <option value="price_asc">Цена по возрастанию</option>
+                      <option value="price_desc">Цена по убыванию</option>
+                      <option value="new">Сначала новые</option>
+                    </select>
+                  </div>
+
+                </div>
+
+                {/* Category Breadcrumbs chain */}
+                {breadcrumbs.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1.5 rounded-xl bg-cyan-950/20 px-4 py-2 text-[11px] text-cyan-400 font-semibold border border-cyan-900/40">
+                    <span className="text-cyan-400/80">Навигация:</span>
+                    <span>Все категории</span>
+                    {breadcrumbs.map((b) => (
+                      <React.Fragment key={b.id}>
+                        <ChevronRight className="h-3 w-3 text-cyan-500" />
+                        <span className={b.is_current ? "text-white font-extrabold" : "text-cyan-400"}>
+                          {b.name}
+                        </span>
+                      </React.Fragment>
                     ))}
                   </div>
-                </div>
-              )}
+                )}
 
-            </div>
+                {/* Main Products Grid Column */}
+                {loading ? (
+                  <div className="flex flex-col items-center justify-center py-20">
+                    <div className="h-8 w-8 animate-spin rounded-full border-2 border-cyan-400 border-t-transparent" />
+                    <span className="mt-4 text-xs font-semibold text-slate-450 font-mono">Запрос товаров от B2B роутера...</span>
+                  </div>
+                ) : products.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-slate-800 bg-slate-900/20 py-16 px-4 text-center">
+                    <div className="flex h-12 w-12 items-center justify-center rounded-full bg-slate-900 border border-slate-800 text-slate-400">
+                      <Search className="h-6 w-6" />
+                    </div>
+                    <h3 className="mt-4 font-sans text-sm font-bold text-white">Увы, совпадений нет</h3>
+                    <p className="mt-1 text-xs text-slate-500 max-w-sm leading-normal">
+                      Мы не нашли каналов под выбранные ценовые ограничения или фильтры. Попробуйте сбросить параметры.
+                    </p>
+                    <button
+                      onClick={handleResetFilters}
+                      className="mt-4 rounded-xl bg-slate-900 text-slate-300 border border-slate-800 px-4 py-2 text-xs font-bold hover:bg-slate-800 transition-colors"
+                    >
+                      Сбросить все фильтры
+                    </button>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-bold text-slate-450 uppercase tracking-widest font-mono">
+                        Найдено каналов: {totalCount}
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
+                      {products.map((p) => (
+                        <ChannelCard
+                          key={p.id}
+                          channel={p}
+                          onClick={() => handleSelectProduct(p.id)}
+                          isFavorite={favorites.includes(p.id)}
+                          onToggleFavorite={handleToggleFavorite}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+              </div>
 
           </div>
+        ) : (
+          /* Favorites Tab View */
+          <div className="space-y-6">
+            
+            {/* Header Favorites Banner */}
+            <div className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-slate-900 via-slate-950 to-slate-950 p-6 md:p-8 text-white border border-slate-800 shadow-xl">
+              <div className="absolute top-0 right-0 h-full w-48 bg-radial-at-t from-rose-500/10 via-transparent to-transparent pointer-events-none" />
+              <div className="max-w-xl">
+                <h1 className="mt-3.5 font-sans text-xl md:text-2xl font-black text-white leading-tight">
+                  Избранные Telegram-каналы
+                </h1>
+              </div>
+            </div>
+
+            {favoritesLoading ? (
+              <div className="flex flex-col items-center justify-center py-20">
+                <div className="h-8 w-8 animate-spin rounded-full border-2 border-rose-500 border-t-transparent" />
+                <span className="mt-4 text-xs font-semibold text-slate-450 font-mono">Загрузка ваших сохраненных каналов...</span>
+              </div>
+            ) : favoriteItems.length === 0 ? (
+              <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-slate-800 bg-slate-900/20 py-16 px-4 text-center">
+                <div className="flex h-12 w-12 items-center justify-center rounded-full bg-slate-900 border border-slate-800 text-rose-500">
+                  <Heart className="h-6 w-6 fill-rose-500" />
+                </div>
+                <h3 className="mt-4 font-sans text-sm font-bold text-white font-mono">Список избранного пуст</h3>
+                <p className="mt-1 text-xs text-slate-500 max-w-sm leading-normal">
+                  Вы пока не добавили ни одного канала в избранное. Изучите наш каталог и отмечайте понравившиеся активы сердечком.
+                </p>
+                <button
+                  onClick={() => setActiveTab("catalog")}
+                  className="mt-5 rounded-2xl bg-white text-slate-950 px-5 py-2.5 text-xs font-black hover:bg-cyan-400 hover:text-slate-950 hover:shadow-cyan-400/10 transition-colors"
+                >
+                  Перейти в Каталог
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-bold text-slate-455 uppercase tracking-widest font-mono">
+                    Всего в избранном: {favoriteItems.length}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4">
+                  {favoriteItems.map((item) => (
+                    <ChannelCard
+                      key={item.id}
+                      channel={item}
+                      onClick={() => handleSelectProduct(item.id)}
+                      isFavorite={true}
+                      onToggleFavorite={(id, e) => handleToggleFavorite(id, e)}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
+            
+          </div>
+        )}
 
       </main>
 
@@ -514,6 +670,8 @@ export default function App() {
           }}
           onAddToCart={handleAddToCart}
           onLoadProductDetail={handleLoadProductDetail}
+          isFavorite={favorites.includes(selectedProductId)}
+          onToggleFavorite={handleToggleFavorite}
         />
       )}
 

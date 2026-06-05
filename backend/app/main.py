@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Query, HTTPException, Header, status, Request
+from fastapi import FastAPI, Query, HTTPException, Header, status, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
@@ -9,7 +9,8 @@ from app.schemas import (
     CategoryRef, CatalogProductCard, PaginatedCatalogProducts,
     FacetsResponse, FacetGroup, FacetItem, CatalogProductDetail,
     BreadcrumbItem, BreadcrumbsResponse, CategoryDetailResponse,
-    CategoryTreeResponse, FlatCategoriesResponse
+    CategoryTreeResponse, FlatCategoriesResponse,
+    FavoriteResponse, FavoritesResponse
 )
 from app.b2b_client import B2BClient
 
@@ -839,5 +840,268 @@ def get_category_details(
         },
         "is_active": True,
         "created_at": "2026-01-15T10:30:00Z"
+    }
+
+
+# Simulated B2C database for favorites
+# Key: user_id (UUID), Value: List of Dict containing product_id (UUID) and added_at (str)
+FAVORITES_DB: Dict[UUID, List[Dict[str, Any]]] = {}
+
+def decode_jwt(token: str) -> dict:
+    import base64
+    import json
+    try:
+        if token.startswith("Bearer "):
+            token = token[7:]
+        token = token.strip()
+        parts = token.split(".")
+        if len(parts) == 3:
+            payload_b64 = parts[1]
+            payload_b64 += "=" * ((4 - len(payload_b64) % 4) % 4)
+            payload_str = base64.urlsafe_b64decode(payload_b64).decode("utf-8")
+            return json.loads(payload_str)
+        else:
+            try:
+                decoded = base64.b64decode(token + "==").decode("utf-8")
+                return json.loads(decoded)
+            except Exception:
+                return {"sub": token}
+    except Exception:
+        return {"sub": token}
+
+def get_user_id_from_auth(authorization: Optional[str]) -> UUID:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "UNAUTHORIZED", "message": "Bearer token is missing or invalid"}
+        )
+    claims = decode_jwt(authorization)
+    user_id_str = claims.get("sub")
+    if not user_id_str:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "UNAUTHORIZED", "message": "Invalid token content"}
+        )
+    try:
+        return UUID(user_id_str)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "UNAUTHORIZED", "message": "sub claim must be a valid UUID"}
+        )
+
+
+@app.post("/api/v1/favorites/{product_id}", response_model=FavoriteResponse)
+@app.put("/api/v1/favorites/{product_id}", response_model=FavoriteResponse)
+def add_to_favorites(
+    product_id: UUID,
+    response: Response,
+    user_id: Optional[UUID] = Query(None),  # Ignored for IDOR protection
+    authorization: Optional[str] = Header(None),
+    x_simulate_b2b_outage: Optional[str] = Header(None, alias="X-Simulate-B2B-Outage")
+):
+    # 1. JWT auth and extraction
+    curr_user_id = get_user_id_from_auth(authorization)
+    
+    # 2. Check outage
+    if x_simulate_b2b_outage == "true" or b2b_client.simulate_outage:
+         raise HTTPException(
+             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+             detail={"code": "B2B_UNAVAILABLE", "message": "B2B Service Unavailable"}
+         )
+         
+    # 3. Check if product exists in B2B database
+    try:
+        raw_products = b2b_client._products
+    except Exception as e:
+         raise HTTPException(
+             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+             detail={"code": "B2B_UNAVAILABLE", "message": f"B2B service error: {str(e)}"}
+         )
+         
+    product = next((p for p in raw_products if p["id"] == product_id), None)
+    if not product:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "NOT_FOUND", "message": "Product not found"}
+        )
+    
+    # 4. Handle addition
+    if curr_user_id not in FAVORITES_DB:
+        FAVORITES_DB[curr_user_id] = []
+        
+    user_favs = FAVORITES_DB[curr_user_id]
+    existing = next((f for f in user_favs if f["product_id"] == product_id), None)
+    
+    from datetime import datetime
+    now_str = datetime.utcnow().isoformat() + "Z"
+    
+    if existing:
+        # Repeat add returns 200, body with existing/current added_at
+        response.status_code = status.HTTP_200_OK
+        return {
+            "product_id": product_id,
+            "user_id": curr_user_id,
+            "added_at": existing["added_at"]
+        }
+    else:
+        # First add returns 201
+        new_fav = {
+            "product_id": product_id,
+            "added_at": now_str
+        }
+        user_favs.append(new_fav)
+        response.status_code = status.HTTP_201_CREATED
+        return {
+            "product_id": product_id,
+            "user_id": curr_user_id,
+            "added_at": now_str
+        }
+
+
+@app.delete("/api/v1/favorites/{product_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_from_favorites(
+    product_id: UUID,
+    user_id: Optional[UUID] = Query(None),  # Ignored for IDOR protection
+    authorization: Optional[str] = Header(None),
+    x_simulate_b2b_outage: Optional[str] = Header(None, alias="X-Simulate-B2B-Outage")
+):
+    # JWT auth and extraction
+    curr_user_id = get_user_id_from_auth(authorization)
+    
+    # Check outage
+    if x_simulate_b2b_outage == "true" or b2b_client.simulate_outage:
+         raise HTTPException(
+             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+             detail={"code": "B2B_UNAVAILABLE", "message": "B2B Service Unavailable"}
+         )
+         
+    if curr_user_id in FAVORITES_DB:
+        FAVORITES_DB[curr_user_id] = [f for f in FAVORITES_DB[curr_user_id] if f["product_id"] != product_id]
+        
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.get("/api/v1/favorites", response_model=FavoritesResponse)
+def get_favorites(
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    user_id: Optional[UUID] = Query(None),  # Ignored for IDOR protection
+    authorization: Optional[str] = Header(None),
+    x_simulate_b2b_outage: Optional[str] = Header(None, alias="X-Simulate-B2B-Outage")
+):
+    # JWT auth and extraction
+    curr_user_id = get_user_id_from_auth(authorization)
+    
+    # Check outage
+    if x_simulate_b2b_outage == "true" or b2b_client.simulate_outage:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": "B2B_UNAVAILABLE", "message": "B2B Service Unavailable"}
+        )
+        
+    # Get user's favorites from simulated B2C DB
+    user_fav_records = FAVORITES_DB.get(curr_user_id, [])
+    
+    # If empty, return immediately
+    if not user_fav_records:
+        return {
+            "items": [],
+            "total_count": 0,
+            "limit": limit,
+            "offset": offset
+        }
+        
+    # Fetch moderated products from B2B to enrich data
+    try:
+        effective_key = "B2B_SECRET_KEY_PROD_2026"
+        b2b_headers = {"X-Service-Key": effective_key}
+        b2b_products = b2b_client.fetch_products(headers=b2b_headers)
+        b2b_categories = b2b_client.fetch_categories(headers=b2b_headers)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": "B2B_UNAVAILABLE", "message": f"B2B service error: {str(e)}"}
+        )
+        
+    # Enrich and filter favorites
+    enriched_items = []
+    
+    for fav_rec in user_fav_records:
+        prod_id = fav_rec["product_id"]
+        p = next((prod for prod in b2b_products if prod["id"] == prod_id), None)
+        if p:
+            # Format category
+            cat_ref = next((c for c in b2b_categories if c["id"] == p["category_id"]), None)
+            cat_path = get_breadcrumbs_for_category(b2b_categories, cat_ref["id"]) if cat_ref else []
+            
+            # Format skus
+            formatted_skus = []
+            raw_skus = p.get("skus", [])
+            if not raw_skus:
+                raw_skus = [{
+                    "id": f"sku-std-{p['id']}",
+                    "name": "Полная передача прав (Базовый)",
+                    "sku_code": f"TG-{p['slug'].upper()}-BASE",
+                    "price": p["price"],
+                    "old_price": p.get("old_price"),
+                    "available_quantity": p.get("active_quantity", 0),
+                    "attributes": { "Помощь в транзите": "Да", "Обучение": "7 дней" },
+                    "images": p.get("images", [])
+                }]
+
+            for sku in raw_skus:
+                price = sku["price"]
+                old_price = sku.get("old_price", 0) or 0
+                calculated_discount = max(0, old_price - price) if old_price > 0 else 0
+
+                sku_clean = {
+                    "id": str(sku["id"]),
+                    "name": sku["name"],
+                    "sku_code": sku["sku_code"],
+                    "price": price,
+                    "old_price": sku.get("old_price"),
+                    "discount": calculated_discount,
+                    "available_quantity": sku.get("available_quantity", sku.get("active_quantity", 0)),
+                    "attributes": sku.get("attributes", {}),
+                    "images": sku.get("images", p.get("images", []))
+                }
+                formatted_skus.append(sku_clean)
+                
+            has_stock = any(sku["available_quantity"] > 0 for sku in formatted_skus) or p.get("active_quantity", 0) > 0
+            
+            enriched_items.append({
+                "id": p["id"],
+                "name": p["title"],
+                "slug": p["slug"],
+                "category": {
+                    "id": cat_ref["id"],
+                    "name": cat_ref["name"],
+                    "level": len(cat_path) - 1,
+                    "path": [t["name"] for t in cat_path]
+                } if cat_ref else None,
+                "min_price": p["price"],
+                "old_price": p.get("old_price"),
+                "has_stock": has_stock,
+                "rating": p.get("rating"),
+                "reviews_count": p.get("reviews_count", 0),
+                "subscribers": p["subscribers"],
+                "monthly_income": p["monthly_income"],
+                "er": p["er"],
+                "verified": p["verified"],
+                "images": p.get("images", []),
+                "seller": p.get("seller"),
+                "skus": formatted_skus,
+                "added_at": fav_rec["added_at"]
+            })
+            
+    total_count = len(enriched_items)
+    paginated_items = enriched_items[offset:offset+limit]
+    
+    return {
+        "items": paginated_items,
+        "total_count": total_count,
+        "limit": limit,
+        "offset": offset
     }
 
