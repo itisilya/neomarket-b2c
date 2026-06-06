@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { CatalogProductCard, CatalogProductDetail, CategoryRef, CatalogSku, FacetsResponse, BreadcrumbItem, FavoriteItem, FavoritesResponse } from "./types";
+import { CatalogProductCard, CatalogProductDetail, CategoryRef, CatalogSku, FacetsResponse, BreadcrumbItem, FavoriteItem, FavoritesResponse, CartResponse, CartItemResponse } from "./types";
 import { SidebarFilters } from "./components/SidebarFilters";
 import { ChannelCard } from "./components/ChannelCard";
 import { ChannelDetailModal } from "./components/ChannelDetailModal";
@@ -57,9 +57,11 @@ export default function App() {
   const [selectedProductId, setSelectedProductId] = useState<string | null>(null);
   const [activeChannelDetail, setActiveChannelDetail] = useState<CatalogProductDetail | null>(null);
 
-  // Simulated Cart and Favorites states
-  const [cart, setCart] = useState<Array<{ sku: CatalogSku; productName: string; quantity: number }>>([]);
+  // Real B2C Cart Integration states
+  const [cart, setCart] = useState<CartResponse>({ items: [], total_amount: 0 });
   const [isCartOpen, setIsCartOpen] = useState(false);
+  const [authMode, setAuthMode] = useState<"authorized" | "guest">("authorized");
+  const [sessionId, setSessionId] = useState<string>("");
   
   // Real B2C Favorites Database Integration
   const MOCK_JWT = "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhMTExMTExMS1lMjliLTQxZDQtYTcxNi00NDY2NTU0NDAwMDEifQ.mock-signature";
@@ -143,10 +145,40 @@ export default function App() {
     }
   };
 
+  const loadCart = async (activeAuthMode?: "authorized" | "guest", customSessionId?: string) => {
+    const resolvedAuthMode = activeAuthMode !== undefined ? activeAuthMode : authMode;
+    const resolvedSessionId = customSessionId !== undefined ? customSessionId : sessionId;
+
+    try {
+      const headers: Record<string, string> = {};
+      if (resolvedAuthMode === "authorized") {
+        headers["Authorization"] = MOCK_JWT;
+      } else if (resolvedSessionId) {
+        headers["X-Session-Id"] = resolvedSessionId;
+      }
+
+      const res = await fetch("/api/v1/cart", { headers });
+      if (res.ok) {
+        const data: CartResponse = await res.json();
+        setCart(data);
+      }
+    } catch (err) {
+      console.error("Failed to load B2C Cart:", err);
+    }
+  };
+
   useEffect(() => {
+    let sId = localStorage.getItem("b2c_session_id");
+    if (!sId) {
+      sId = "guest_session_" + Math.random().toString(36).substring(2, 10);
+      localStorage.setItem("b2c_session_id", sId);
+    }
+    setSessionId(sId);
+    
     loadFavorites();
     loadSubscriptions();
-  }, []);
+    loadCart(authMode, sId);
+  }, [authMode]);
 
   const handleToggleFavorite = async (productId: string, e?: React.MouseEvent) => {
     if (e) {
@@ -326,32 +358,113 @@ export default function App() {
     return null;
   };
 
-  const handleAddToCart = (sku: CatalogSku, productName: string) => {
-    setCart((prev) => {
-      const exists = prev.find((item) => item.sku.id === sku.id);
-      if (exists) {
-        return prev.map((item) =>
-          item.sku.id === sku.id ? { ...item, quantity: item.quantity + 1 } : item
-        );
+  const handleAddToCart = async (sku: CatalogSku, productName: string) => {
+    try {
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json"
+      };
+      if (authMode === "authorized") {
+        headers["Authorization"] = MOCK_JWT;
+      } else if (sessionId) {
+        headers["X-Session-Id"] = sessionId;
       }
-      return [...prev, { sku, productName, quantity: 1 }];
-    });
+
+      const res = await fetch("/api/v1/cart/items", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ sku_id: sku.id, quantity: 1 })
+      });
+      if (res.ok) {
+        const updatedCart: CartResponse = await res.json();
+        setCart(updatedCart);
+      } else {
+        console.error("Failed to add SKU into Cart API");
+      }
+    } catch (err) {
+      console.error("Failed adding to cart:", err);
+    }
   };
 
-  const handleRemoveFromCart = (skuId: string) => {
-    setCart((prev) => prev.filter((item) => item.sku.id !== skuId));
+  const handleRemoveFromCart = async (skuId: string) => {
+    try {
+      const headers: Record<string, string> = {};
+      if (authMode === "authorized") {
+        headers["Authorization"] = MOCK_JWT;
+      } else if (sessionId) {
+        headers["X-Session-Id"] = sessionId;
+      }
+
+      const res = await fetch(`/api/v1/cart/items/${skuId}`, {
+        method: "DELETE",
+        headers
+      });
+      if (res.ok || res.status === 204) {
+        await loadCart(authMode, sessionId);
+      }
+    } catch (err) {
+      console.error("Failed deleting cart item:", err);
+    }
+  };
+
+  const handleUpdateQuantity = async (skuId: string, quantity: number) => {
+    if (quantity < 1) {
+      await handleRemoveFromCart(skuId);
+      return;
+    }
+    try {
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json"
+      };
+      if (authMode === "authorized") {
+        headers["Authorization"] = MOCK_JWT;
+      } else if (sessionId) {
+        headers["X-Session-Id"] = sessionId;
+      }
+
+      const res = await fetch(`/api/v1/cart/items/${skuId}`, {
+        method: "PUT",
+        headers,
+        body: JSON.stringify({ quantity })
+      });
+      if (res.ok) {
+        const updatedCart: CartResponse = await res.json();
+        setCart(updatedCart);
+      }
+    } catch (err) {
+      console.error("Failed updating item quantity:", err);
+    }
+  };
+
+  const handleMergeCart = async () => {
+    try {
+      const res = await fetch("/api/v1/cart/merge", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": MOCK_JWT
+        },
+        body: JSON.stringify({ session_id: sessionId })
+      });
+      if (res.ok) {
+        const mergedCart: CartResponse = await res.json();
+        setCart(mergedCart);
+        setAuthMode("authorized");
+      }
+    } catch (err) {
+      console.error("Failed merging guest cart into authorized:", err);
+    }
   };
 
   const handleSimulatedCheckout = () => {
     setCheckoutFinished(true);
     setTimeout(() => {
-      setCart([]);
+      setCart({ items: [], total_amount: 0 });
       setCheckoutFinished(false);
       setIsCartOpen(false);
     }, 4000);
   };
 
-  const cartTotal = cart.reduce((sum, item) => sum + item.sku.price * item.quantity, 0);
+  const cartTotal = cart.total_amount;
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 antialiased font-sans">
@@ -407,15 +520,41 @@ export default function App() {
           </div>
 
           {/* Cart & Status Ribbon */}
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-3">
+            {/* Authenticated Mode Selector */}
+            <div className="hidden sm:flex items-center bg-slate-900 border border-slate-800 rounded-xl p-0.5 text-[10px] font-mono">
+              <button
+                onClick={() => setAuthMode("authorized")}
+                className={`px-2.5 py-1.5 rounded-lg transition-all ${
+                  authMode === "authorized" 
+                    ? "bg-cyan-500 text-slate-950 font-bold" 
+                    : "text-slate-400 hover:text-white"
+                }`}
+                title="Режим авторизованного пользователя API"
+              >
+                🔐 Вошедший юзер
+              </button>
+              <button
+                onClick={() => setAuthMode("guest")}
+                className={`px-2.5 py-1.5 rounded-lg transition-all ${
+                  authMode === "guest" 
+                    ? "bg-amber-500 text-slate-950 font-bold" 
+                    : "text-slate-400 hover:text-white"
+                }`}
+                title="Режим анонимного гостя (сессия)"
+              >
+                👤 Гость
+              </button>
+            </div>
+
             <button
               onClick={() => setIsCartOpen(true)}
               className="relative flex h-10 w-10 items-center justify-center rounded-xl bg-slate-900 hover:bg-slate-850 border border-slate-800 transition-colors"
             >
               <ShoppingCart className="h-4.5 w-4.5 text-slate-200" />
-              {cart.length > 0 && (
+              {cart.items.length > 0 && (
                 <span className="absolute -top-1.5 -right-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-cyan-500 text-[10px] font-black font-mono text-slate-950 animate-pulse">
-                  {cart.length}
+                  {cart.items.length}
                 </span>
               )}
             </button>
@@ -634,9 +773,14 @@ export default function App() {
           <div className="h-full w-full max-w-sm bg-slate-900/95 p-6 shadow-2xl flex flex-col justify-between animate-in slide-in-from-right duration-250 glass border-l border-slate-800">
             <div>
               <div className="flex items-center justify-between border-b border-slate-800 pb-4">
-                <h3 className="font-sans text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1.5">
-                  <ShoppingCart className="h-4 w-4 text-cyan-400" /> Ваша Корзина B2C
-                </h3>
+                <div className="flex flex-col">
+                  <h3 className="font-sans text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1.5 animate-in slide-in-from-top">
+                    <ShoppingCart className="h-4 w-4 text-cyan-400" /> Ваша Корзина B2C
+                  </h3>
+                  <span className="text-[9px] font-semibold text-slate-500 font-mono mt-0.5">
+                    {authMode === "authorized" ? "🔑 Режим: Авторизован (User)" : "👤 Режим: Гость (Guest)"}
+                  </span>
+                </div>
                 <button
                   onClick={() => setIsCartOpen(false)}
                   className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white transition-colors duration-150"
@@ -645,7 +789,7 @@ export default function App() {
                 </button>
               </div>
 
-              {cart.length === 0 ? (
+              {cart.items.length === 0 ? (
                 <div className="text-center py-20 text-slate-500 flex flex-col items-center justify-center">
                   <ShoppingCart className="h-10 w-10 text-slate-800" />
                   <span className="text-xs font-bold mt-4 block text-slate-450">Корзина пока пуста</span>
@@ -655,28 +799,68 @@ export default function App() {
                 </div>
               ) : (
                 <div className="mt-6 space-y-4 max-h-[60vh] overflow-y-auto pr-1">
-                  {cart.map((item) => {
-                    const skuSubtotal = Math.round((item.sku.price * item.quantity) / 100);
+                  {cart.items.map((item) => {
+                    const skuSubtotal = Math.round(item.subtotal / 100);
+                    const prodName = item.product?.name || item.sku?.name || "Неизвестный канал";
+                    const isUnavailable = !!item.unavailable_reason;
                     return (
                       <div
-                        key={item.sku.id}
-                        className="flex items-start justify-between border-b border-slate-850 pb-4 animate-in fade-in"
+                        key={item.sku_id}
+                        className={`flex flex-col border-b border-slate-850 pb-4 animate-in fade-in ${
+                          isUnavailable ? "opacity-60 bg-rose-950/10 p-2.5 rounded-xl border border-rose-900/30" : ""
+                        }`}
                       >
-                        <div>
-                          <span className="block text-xs font-bold text-white leading-tight">{item.productName}</span>
-                          <span className="block text-[10px] text-cyan-400 mt-1 font-semibold">{item.sku.name}</span>
-                          <span className="block text-[9px] text-slate-500 mt-1 font-mono">Код: {item.sku.sku_code}</span>
-                        </div>
-                        <div className="text-right shrink-0">
-                          <span className="block font-mono text-xs font-extrabold text-white">
-                            {skuSubtotal.toLocaleString("ru-RU")} ₽
-                          </span>
-                          <button
-                            onClick={() => handleRemoveFromCart(item.sku.id)}
-                            className="text-[9px] font-bold text-rose-400 hover:text-rose-350 hover:underline mt-1 block"
-                          >
-                            Удалить
-                          </button>
+                        <div className="flex items-start justify-between">
+                          <div>
+                            <span className="block text-xs font-bold text-white leading-tight">
+                              {prodName}
+                            </span>
+                            {item.sku ? (
+                              <>
+                                <span className="block text-[10px] text-cyan-400 mt-1 font-semibold">{item.sku.name}</span>
+                                <span className="block text-[9px] text-slate-500 mt-1 font-mono">Код: {item.sku.sku_code}</span>
+                              </>
+                            ) : (
+                              <span className="block text-[10px] text-slate-500 mt-1">Товар недоступен</span>
+                            )}
+                            
+                            {isUnavailable && (
+                              <span className="inline-block mt-2 bg-rose-500/10 border border-rose-500/20 text-rose-400 text-[8px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded">
+                                {item.unavailable_reason === "OUT_OF_STOCK" ? "Нет на складе" : "Ограничен или Удален"}
+                              </span>
+                            )}
+                          </div>
+                          
+                          <div className="text-right shrink-0 ml-2">
+                            <span className="block font-mono text-xs font-extrabold text-white">
+                              {skuSubtotal.toLocaleString("ru-RU")} ₽
+                            </span>
+                            {!isUnavailable && (
+                              <div className="flex items-center gap-1 justify-end mt-2 bg-slate-950 border border-slate-800 rounded-lg p-0.5 max-w-max ml-auto shadow-inner">
+                                <button
+                                  onClick={() => handleUpdateQuantity(item.sku_id, item.quantity - 1)}
+                                  className="h-4.5 w-4.5 text-[9px] bg-slate-900 hover:bg-slate-800 rounded flex items-center justify-center font-black transition-colors"
+                                >
+                                  -
+                                </button>
+                                <span className="text-[10px] font-bold font-mono px-1.5 text-slate-300">
+                                  {item.quantity}
+                                </span>
+                                <button
+                                  onClick={() => handleUpdateQuantity(item.sku_id, item.quantity + 1)}
+                                  className="h-4.5 w-4.5 text-[9px] bg-slate-900 hover:bg-slate-800 rounded flex items-center justify-center font-black transition-colors"
+                                >
+                                  +
+                                </button>
+                              </div>
+                            )}
+                            <button
+                              onClick={() => handleRemoveFromCart(item.sku_id)}
+                              className="text-[9px] font-bold text-rose-400 hover:text-rose-350 hover:underline mt-2 block ml-auto"
+                            >
+                              Удалить
+                            </button>
+                          </div>
                         </div>
                       </div>
                     );
@@ -685,8 +869,27 @@ export default function App() {
               )}
             </div>
 
-            {cart.length > 0 && (
+            {cart.items.length > 0 && (
               <div className="border-t border-slate-800 pt-6">
+                
+                {/* Mode Context Smart Notice or Merger Banner */}
+                {authMode === "guest" && (
+                  <div className="mb-4 bg-amber-950/40 border border-amber-900/50 p-2.5 rounded-xl flex items-center justify-between text-left">
+                    <div className="max-w-[70%]">
+                      <span className="text-[8px] font-bold uppercase tracking-wider text-amber-400 block">Гостевая сессия</span>
+                      <span className="text-[9px] text-slate-300 mt-0.5 block leading-normal">
+                        Хотите сохранить эти товары в аккаунт?
+                      </span>
+                    </div>
+                    <button
+                      onClick={handleMergeCart}
+                      className="rounded-lg bg-amber-500 text-slate-950 px-2 py-1 text-[8px] font-black uppercase hover:bg-amber-400 transition-colors shrink-0 font-mono"
+                    >
+                      🤝 Слить
+                    </button>
+                  </div>
+                )}
+
                 <div className="flex items-center justify-between">
                   <div>
                     <span className="text-[9px] text-slate-400 uppercase tracking-widest font-semibold block">Итого к оплате</span>
@@ -697,7 +900,7 @@ export default function App() {
                   <button
                     onClick={handleSimulatedCheckout}
                     disabled={checkoutFinished}
-                    className="rounded-xl bg-white text-slate-900 px-5 py-2.5 text-xs font-extrabold hover:bg-cyan-400 hover:text-slate-950 disabled:bg-emerald-600 disabled:text-white transition-all duration-200"
+                    className="rounded-xl bg-white text-slate-900 px-5 py-2.5 text-xs font-extrabold hover:bg-cyan-400 hover:text-slate-950 disabled:bg-emerald-600 disabled:text-white transition-all duration-200 shadow-lg"
                   >
                     {checkoutFinished ? "🎉 Оплата принята!" : "Купить активы"}
                   </button>

@@ -617,4 +617,147 @@ def test_subscribe_to_unknown_product_returns_404():
     assert response.json()["code"] == "NOT_FOUND"
 
 
+# --- US-CART-03: Cart management Test Suite ---
 
+def test_add_sku_increments_quantity_if_already_in_cart():
+    """
+    happy: add_sku_increments_quantity_if_already_in_cart
+    Повторное добавление того же SKU увеличивает quantity в корзине.
+    """
+    from app.main import CART_DB
+    session_id = "test-guest-session-123"
+    sku_id = "s-01"
+    
+    if session_id in CART_DB:
+        del CART_DB[session_id]
+        
+    res1 = client.post(
+        "/api/v1/cart/items",
+        json={"sku_id": sku_id, "quantity": 1},
+        headers={"X-Session-Id": session_id}
+    )
+    assert res1.status_code == 200
+    data1 = res1.json()
+    assert len(data1["items"]) == 1
+    assert data1["items"][0]["sku_id"] == sku_id
+    assert data1["items"][0]["quantity"] == 1
+    
+    res2 = client.post(
+        "/api/v1/cart/items",
+        json={"sku_id": sku_id, "quantity": 3},
+        headers={"X-Session-Id": session_id}
+    )
+    assert res2.status_code == 200
+    data2 = res2.json()
+    assert len(data2["items"]) == 1
+    assert data2["items"][0]["sku_id"] == sku_id
+    assert data2["items"][0]["quantity"] == 4
+
+
+def test_get_cart_enriched_with_b2b_data():
+    """
+    happy: get_cart_enriched_with_b2b_data
+    Получение корзины обогащает данные из B2B (название, характеристики, цены, subtotal).
+    """
+    from app.main import CART_DB
+    session_id = "test-guest-session-456"
+    sku_id = "s-01"
+    
+    CART_DB[session_id] = {sku_id: 2}
+    
+    response = client.get(
+        "/api/v1/cart",
+        headers={"X-Session-Id": session_id}
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert "items" in data
+    assert "total_amount" in data
+    assert len(data["items"]) == 1
+    
+    item = data["items"][0]
+    assert item["sku_id"] == sku_id
+    assert item["quantity"] == 2
+    assert item["sku"] is not None
+    assert item["sku"]["name"] == "Полная передача прав (Базовый)"
+    assert item["sku"]["price"] == 15000000
+    assert item["product"] is not None
+    assert item["product"]["name"] == "Crypto Whale Alerts 🐳"
+    assert item["subtotal"] == 30000000
+    assert data["total_amount"] == 30000000
+
+
+def test_unavailable_sku_shown_with_reason():
+    """
+    unhappy: unavailable_sku_shown_with_reason
+    Недоступный SKU в корзине возвращается с unavailable_reason,
+    но не участвует в подсчете total_amount.
+    """
+    from app.main import CART_DB
+    session_id = "test-guest-session-789"
+    
+    out_of_stock_sku_id = "sku-std-770e8400-e29b-41d4-a716-446655440097"
+    active_sku_id = "s-01"
+    
+    CART_DB[session_id] = {
+        out_of_stock_sku_id: 1,
+        active_sku_id: 2
+    }
+    
+    response = client.get(
+        "/api/v1/cart",
+        headers={"X-Session-Id": session_id}
+    )
+    assert response.status_code == 200
+    data = response.json()
+    
+    items = {item["sku_id"]: item for item in data["items"]}
+    assert len(items) == 2
+    
+    oos_item = items[out_of_stock_sku_id]
+    assert oos_item["unavailable_reason"] is not None
+    assert oos_item["unavailable_reason"] in ["OUT_OF_STOCK", "UNAVAILABLE"]
+    assert oos_item["subtotal"] == 0
+    
+    active_item = items[active_sku_id]
+    assert active_item["unavailable_reason"] is None
+    assert active_item["subtotal"] == 30000000
+    
+    assert data["total_amount"] == 30000000
+
+
+def test_guest_cart_merged_on_login():
+    """
+    happy/merge: guest_cart_merged_on_login
+    При слиянии гостевой корзины с авторизованной при конфликте берется MAX(guest, auth).
+    """
+    from app.main import CART_DB
+    guest_session_id = "test-guest-session-merge"
+    user_id = "c1111111-e29b-41d4-a716-446655449999"
+    token = create_mock_jwt(user_id)
+    
+    sku_conflict = "s-01"
+    sku_unique_guest = "sku-std-770e8400-e29b-41d4-a716-446655d40011"
+    
+    CART_DB[guest_session_id] = {
+        sku_conflict: 2,
+        sku_unique_guest: 1
+    }
+    
+    CART_DB[user_id] = {
+        sku_conflict: 5
+    }
+    
+    response = client.post(
+        "/api/v1/cart/merge",
+        json={"session_id": guest_session_id},
+        headers={"Authorization": token}
+    )
+    assert response.status_code == 200
+    data = response.json()
+    
+    assert guest_session_id not in CART_DB
+    
+    items = {item["sku_id"]: item for item in data["items"]}
+    assert items[sku_conflict]["quantity"] == 5
+    assert items[sku_unique_guest]["quantity"] == 1

@@ -103,3 +103,20 @@ export interface FavoritesResponse {
   offset: number;
 }
 
+
+export interface CartItemResponse {
+  sku_id: string;
+  quantity: number;
+  sku: CatalogSku | null;
+  product: CatalogProductCard | null;
+  unavailable_reason: string | null;
+  price_at_addition: number | null;
+  subtotal: number;
+}
+
+export interface CartResponse {
+  items: CartItemResponse[];
+  total_amount: number;
+}
+
+
