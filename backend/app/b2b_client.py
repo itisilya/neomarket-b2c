@@ -55,7 +55,7 @@ class B2BClient:
                     {"name": "Язык аудитории", "value": "Русский"}
                 ],
                 "skus": [
-                    {"id": "s-01", "name": "Полная передача прав (Базовый)", "sku_code": "TG-WHALE-BASE", "price": 15000000, "available_quantity": 1, "images": []}
+                    {"id": UUID("00000000-0000-0000-0000-000000000001"), "name": "Полная передача прав (Базовый)", "sku_code": "TG-WHALE-BASE", "price": 15000000, "available_quantity": 1, "images": []}
                 ]
             },
             {

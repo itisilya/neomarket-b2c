@@ -510,9 +510,9 @@ def test_user_id_from_query_is_ignored():
     assert get_bob.json()["total_count"] == 0
 
 
-def test_subscribe_returns_201_with_notify_on():
+def test_subscribe_returns_204_with_events():
     """
-    happy: subscribe_returns_201_with_notify_on
+    happy: subscribe_returns_204_with_events
     """
     from app.main import SUBSCRIPTIONS_DB
     user_id = "c1111111-e29b-41d4-a716-446655440101"
@@ -528,16 +528,16 @@ def test_subscribe_returns_201_with_notify_on():
     # Create subscription
     response = client.post(
         f"/api/v1/favorites/{product_id}/subscribe",
-        json={"notify_on": ["PRICE_DROP", "BACK_IN_STOCK"]},
+        json={"events": ["PRICE_DROP", "BACK_IN_STOCK"]},
         headers={"Authorization": token}
     )
-    assert response.status_code == 201
-    data = response.json()
-    assert data["product_id"] == product_id
-    assert data["user_id"] == user_id
-    assert data["notify_on"] == ["PRICE_DROP", "BACK_IN_STOCK"]
-    assert "id" in data
-    assert "created_at" in data
+    assert response.status_code == 204
+    
+    # Assert DB is correctly populated
+    assert user_uuid in SUBSCRIPTIONS_DB
+    sub = SUBSCRIPTIONS_DB[user_uuid][0]
+    assert str(sub["product_id"]) == product_id
+    assert sub["events"] == ["PRICE_DROP", "BACK_IN_STOCK"]
 
     # Clean up / unsubscribe
     del_res = client.delete(
@@ -555,18 +555,18 @@ def test_duplicate_subscription_returns_409():
     product_id = "770e8400-e29b-41d4-a716-446655440001"
     token = create_mock_jwt(user_id)
 
-    # Subscribe once -> 201
+    # Subscribe once -> 204
     response1 = client.post(
         f"/api/v1/favorites/{product_id}/subscribe",
-        json={"notify_on": ["PRICE_DROP"]},
+        json={"events": ["PRICE_DROP"]},
         headers={"Authorization": token}
     )
-    assert response1.status_code == 201
+    assert response1.status_code == 204
 
     # Subscribe twice -> 409
     response2 = client.post(
         f"/api/v1/favorites/{product_id}/subscribe",
-        json={"notify_on": ["BACK_IN_STOCK"]},
+        json={"events": ["BACK_IN_STOCK"]},
         headers={"Authorization": token}
     )
     assert response2.status_code == 409
@@ -584,7 +584,7 @@ def test_invalid_notify_on_returns_400():
     # Empty notify_on -> 400
     response1 = client.post(
         f"/api/v1/favorites/{product_id}/subscribe",
-        json={"notify_on": []},
+        json={"events": []},
         headers={"Authorization": token}
     )
     assert response1.status_code == 400
@@ -593,7 +593,7 @@ def test_invalid_notify_on_returns_400():
     # Invalid list value -> 400
     response2 = client.post(
         f"/api/v1/favorites/{product_id}/subscribe",
-        json={"notify_on": ["invalid_event_type"]},
+        json={"events": ["invalid_event_type"]},
         headers={"Authorization": token}
     )
     assert response2.status_code == 400
@@ -610,7 +610,7 @@ def test_subscribe_to_unknown_product_returns_404():
 
     response = client.post(
         f"/api/v1/favorites/{unknown_id}/subscribe",
-        json={"notify_on": ["PRICE_DROP"]},
+        json={"events": ["PRICE_DROP"]},
         headers={"Authorization": token}
     )
     assert response.status_code == 404
@@ -626,7 +626,7 @@ def test_add_sku_increments_quantity_if_already_in_cart():
     """
     from app.main import CART_DB
     session_id = "test-guest-session-123"
-    sku_id = "s-01"
+    sku_id = "00000000-0000-0000-0000-000000000001"
     
     if session_id in CART_DB:
         del CART_DB[session_id]
@@ -661,7 +661,7 @@ def test_get_cart_enriched_with_b2b_data():
     """
     from app.main import CART_DB
     session_id = "test-guest-session-456"
-    sku_id = "s-01"
+    sku_id = "00000000-0000-0000-0000-000000000001"
     
     CART_DB[session_id] = {sku_id: 2}
     
@@ -696,8 +696,8 @@ def test_unavailable_sku_shown_with_reason():
     from app.main import CART_DB
     session_id = "test-guest-session-789"
     
-    out_of_stock_sku_id = "sku-std-770e8400-e29b-41d4-a716-446655440097"
-    active_sku_id = "s-01"
+    out_of_stock_sku_id = "770e8400-e29b-41d4-a716-446655440097"
+    active_sku_id = "00000000-0000-0000-0000-000000000001"
     
     CART_DB[session_id] = {
         out_of_stock_sku_id: 1,
@@ -736,8 +736,8 @@ def test_guest_cart_merged_on_login():
     user_id = "c1111111-e29b-41d4-a716-446655449999"
     token = create_mock_jwt(user_id)
     
-    sku_conflict = "s-01"
-    sku_unique_guest = "sku-std-770e8400-e29b-41d4-a716-446655d40011"
+    sku_conflict = "00000000-0000-0000-0000-000000000001"
+    sku_unique_guest = "770e8400-e29b-41d4-a716-446655d40011"
     
     CART_DB[guest_session_id] = {
         sku_conflict: 2,
@@ -751,7 +751,7 @@ def test_guest_cart_merged_on_login():
     response = client.post(
         "/api/v1/cart/merge",
         json={"session_id": guest_session_id},
-        headers={"Authorization": token}
+        headers={"Authorization": token, "X-Session-Id": guest_session_id}
     )
     assert response.status_code == 200
     data = response.json()
@@ -761,3 +761,143 @@ def test_guest_cart_merged_on_login():
     items = {item["sku_id"]: item for item in data["items"]}
     assert items[sku_conflict]["quantity"] == 5
     assert items[sku_unique_guest]["quantity"] == 1
+
+
+# --- US-CART-04: Banners & CTR Analytics tests ---
+
+def test_active_banners_returned_sorted_by_priority():
+    """
+    happy: active_banners_returned_sorted_by_priority
+    Проверяет, что возвращаются только активные баннеры (is_active=true) и находящиеся 
+    в пределах своего расписания (start_at <= now <= end_at), отсортированные по priority (ascending: меньше значение = выше).
+    """
+    from app.main import BANNERS_DB
+    import uuid
+    
+    # Save original DB to restore after test
+    orig_banners = list(BANNERS_DB)
+    
+    # Prepopulate with controlled banners
+    BANNERS_DB.clear()
+    b1 = {
+        "id": uuid.UUID("ca111111-1111-1111-1111-111111111111"),
+        "title": "Banner Low Priority",
+        "image_url": "url1",
+        "link_url": "link1",
+        "priority": 10,
+        "is_active": True,
+        "start_at": "2026-06-01T00:00:00Z",
+        "end_at": "2026-06-30T23:59:59Z",
+    }
+    b2 = {
+        "id": uuid.UUID("ca222222-2222-2222-2222-222222222222"),
+        "title": "Banner High Priority",
+        "image_url": "url2",
+        "link_url": "link2",
+        "priority": 100,
+        "is_active": True,
+        "start_at": "2026-06-01T00:00:00Z",
+        "end_at": "2026-06-30T23:59:59Z",
+    }
+    b_inactive = {
+        "id": uuid.UUID("ca333333-3333-3333-3333-333333333333"),
+        "title": "Banner Inactive",
+        "image_url": "url3",
+        "link_url": "link3",
+        "priority": 500,
+        "is_active": False,
+        "start_at": "2026-06-01T00:00:00Z",
+        "end_at": "2026-06-30T23:59:59Z",
+    }
+    b_future = {
+        "id": uuid.UUID("ca444444-4444-4444-4444-444444444444"),
+        "title": "Banner Future",
+        "image_url": "url4",
+        "link_url": "link4",
+        "priority": 600,
+        "is_active": True,
+        "start_at": "2026-07-01T00:00:00Z",
+        "end_at": "2026-07-31T23:59:59Z",
+    }
+    
+    BANNERS_DB.extend([b1, b2, b_inactive, b_future])
+    
+    try:
+        response = client.get("/api/v1/catalog/banners")
+        assert response.status_code == 200
+        data = response.json()
+        
+        # Should only contain active inside schedule (b1 and b2)
+        assert len(data) == 2
+        
+        # Sorted by priority ascending (b1 with priority 10 first, then b2 with priority 100)
+        assert data[0]["id"] == "ca111111-1111-1111-1111-111111111111"
+        assert data[0]["title"] == "Banner Low Priority"
+        assert data[0]["link"] == "link1"
+        assert data[0]["ordering"] == 10
+        assert data[1]["id"] == "ca222222-2222-2222-2222-222222222222"
+        assert data[1]["title"] == "Banner High Priority"
+        assert data[1]["link"] == "link2"
+        assert data[1]["ordering"] == 100
+        
+        # Also assert the compatibility route works
+        compatibility_response = client.get("/api/v1/home/banners")
+        assert compatibility_response.status_code == 200
+        assert len(compatibility_response.json()) == 2
+        
+    finally:
+        BANNERS_DB.clear()
+        BANNERS_DB.extend(orig_banners)
+
+
+def test_no_active_banners_returns_200_empty():
+    """
+    unhappy: no_active_banners_returns_200_empty
+    Если нет активных баннеров в данный момент времени, возвращается статус 200 с пустым списком [].
+    """
+    from app.main import BANNERS_DB
+    
+    # Save original
+    orig_banners = list(BANNERS_DB)
+    BANNERS_DB.clear()
+    
+    try:
+        response = client.get("/api/v1/catalog/banners")
+        assert response.status_code == 200
+        assert response.json() == []
+    finally:
+        BANNERS_DB.clear()
+        BANNERS_DB.extend(orig_banners)
+
+
+def test_click_on_unknown_banner_returns_400():
+    """
+    unhappy: click_on_unknown_banner_returns_400
+    Отправка CTR-события для несуществующего (неизвестного) баннера возвращает статус 400 Bad Request.
+    """
+    unknown_id = "00000000-0000-0000-0000-000000000000"
+    response = client.post(
+        "/api/v1/banner-events",
+        json={"banner_id": unknown_id, "event_type": "CLICK"}
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "BANNER_NOT_FOUND"
+
+
+def test_click_on_valid_banner_returns_201():
+    """
+    happy: click_on_valid_banner_returns_21
+    """
+    from app.main import BANNERS_DB, BANNER_EVENTS_LOG
+    if len(BANNERS_DB) > 0:
+        valid_banner_id = str(BANNERS_DB[0]["id"])
+        init_len = len(BANNER_EVENTS_LOG)
+        
+        response = client.post(
+            "/api/v1/banner-events",
+            json={"banner_id": valid_banner_id, "event_type": "CLICK"}
+        )
+        assert response.status_code == 201
+        assert len(BANNER_EVENTS_LOG) == init_len + 1
+        assert BANNER_EVENTS_LOG[-1]["banner_id"] == BANNERS_DB[0]["id"]
+        assert BANNER_EVENTS_LOG[-1]["event_type"] == "CLICK"
