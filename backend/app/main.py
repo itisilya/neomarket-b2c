@@ -11,7 +11,8 @@ from app.schemas import (
     BreadcrumbItem, BreadcrumbsResponse, CategoryDetailResponse,
     CategoryTreeNode, FlatCategoryItem,
     FavoriteResponse, FavoritesResponse,
-    SubscriptionRequest, SubscriptionResponse, SubscriptionsListResponse
+    SubscriptionRequest, SubscriptionResponse, SubscriptionsListResponse,
+    CartItemAddRequest, CartItemUpdateRequest, CartItemResponse, CartResponse, CartMergeRequest
 )
 from app.b2b_client import B2BClient
 
@@ -1227,4 +1228,319 @@ def unsubscribe_product(
         ]
         
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# --- US-CART-03: Cart management ---
+
+CART_DB: Dict[str, Dict[str, int]] = {}
+
+
+def find_sku_and_product_in_b2b(b2b_products: list, sku_id: str):
+    for p in b2b_products:
+        raw_skus = p.get("skus", [])
+        if not raw_skus:
+            # Fallback SKU simulation
+            fallback_sku_id = f"sku-std-{p['id']}"
+            if fallback_sku_id == sku_id:
+                fallback_sku = {
+                    "id": fallback_sku_id,
+                    "name": "Полная передача прав (Базовый)",
+                    "sku_code": f"TG-{p['slug'].upper()}-BASE",
+                    "price": p["price"],
+                    "old_price": p.get("old_price"),
+                    "available_quantity": p.get("active_quantity", 0),
+                    "attributes": { "Помощь в транзите": "Да", "Обучение": "7 дней" },
+                    "images": p.get("images", [])
+                }
+                return fallback_sku, p
+        else:
+            for s in raw_skus:
+                if str(s.get("id")) == sku_id:
+                    sku_data = {
+                        "id": str(s.get("id")),
+                        "name": s["name"],
+                        "sku_code": s["sku_code"],
+                        "price": s["price"],
+                        "old_price": s.get("old_price"),
+                        "available_quantity": s.get("available_quantity", s.get("active_quantity", 0)),
+                        "attributes": s.get("attributes", {}),
+                        "images": s.get("images", p.get("images", []))
+                    }
+                    return sku_data, p
+    return None, None
+
+
+def get_cart_owner_id(authorization: Optional[str], x_session_id: Optional[str], session_id_query: Optional[str] = None) -> str:
+    if authorization and authorization.startswith("Bearer "):
+        try:
+            claims = decode_jwt(authorization)
+            user_id_str = claims.get("sub")
+            if user_id_str:
+                return str(user_id_str)
+        except Exception:
+            pass
+    
+    resolved_session = x_session_id or session_id_query
+    if resolved_session:
+        return str(resolved_session)
+        
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail={"code": "UNAUTHORIZED", "message": "Bearer token or X-Session-Id is missing"}
+    )
+
+
+def _build_cart_response(owner_id: str, x_simulate_b2b_outage: Optional[str] = None) -> dict:
+    if x_simulate_b2b_outage == "true" or b2b_client.simulate_outage:
+         raise HTTPException(
+             status_code=status.HTTP_502_BAD_GATEWAY,
+             detail={"code": "B2B_UNAVAILABLE", "message": "B2B Service Unavailable"}
+         )
+         
+    try:
+        effective_key = "B2B_SECRET_KEY_PROD_2026"
+        b2b_headers = {"X-Service-Key": effective_key}
+        b2b_products = b2b_client.fetch_products(headers=b2b_headers)
+        b2b_categories = b2b_client.fetch_categories(headers=b2b_headers)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "B2B_UNAVAILABLE", "message": f"B2B service error: {str(e)}"}
+        )
+
+    items_in_cart = CART_DB.get(owner_id, {})
+    enriched_items = []
+    total_amount = 0
+    
+    for sku_id, quantity in items_in_cart.items():
+        raw_sku, raw_product = find_sku_and_product_in_b2b(b2b_client._products, sku_id)
+        active_sku, active_product = find_sku_and_product_in_b2b(b2b_products, sku_id)
+        
+        unavailable_reason = None
+        if not raw_sku or not raw_product:
+            unavailable_reason = "SKU_NOT_FOUND"
+        elif raw_product.get("deleted", False):
+            unavailable_reason = "DELETED"
+        elif raw_product.get("status") != "MODERATED":
+            unavailable_reason = "UNPUBLISHED"
+        elif raw_sku.get("available_quantity", 0) <= 0:
+            unavailable_reason = "OUT_OF_STOCK"
+        elif not active_sku or not active_product:
+            unavailable_reason = "UNAVAILABLE"
+            
+        sku_clean = None
+        product_clean = None
+        subtotal = 0
+        
+        resolved_sku = active_sku or raw_sku
+        resolved_product = active_product or raw_product
+        
+        if resolved_product and resolved_sku:
+            product_images = resolved_product.get("images", [])
+            images_formatted = []
+            for img in product_images:
+                images_formatted.append({
+                    "id": str(img.get("id")),
+                    "url": img.get("url"),
+                    "alt": img.get("alt", None),
+                    "ordering": img.get("ordering", 0),
+                    "is_main": img.get("is_main", False)
+                })
+
+            sku_images_formatted = []
+            for img in resolved_sku.get("images", []):
+                sku_images_formatted.append({
+                    "id": str(img.get("id")),
+                    "url": img.get("url"),
+                    "alt": img.get("alt", None),
+                    "ordering": img.get("ordering", 0),
+                    "is_main": img.get("is_main", False)
+                })
+            if not sku_images_formatted:
+                sku_images_formatted = images_formatted
+
+            price = resolved_sku["price"]
+            old_price = resolved_sku.get("old_price", 0) or 0
+            calculated_discount = max(0, old_price - price) if old_price > 0 else 0
+
+            sku_clean = {
+                "id": str(resolved_sku["id"]),
+                "name": resolved_sku["name"],
+                "sku_code": resolved_sku["sku_code"],
+                "price": price,
+                "old_price": resolved_sku.get("old_price"),
+                "discount": calculated_discount,
+                "available_quantity": resolved_sku.get("available_quantity", 0),
+                "attributes": resolved_sku.get("attributes", {}),
+                "images": sku_images_formatted
+            }
+            
+            cat_ref = next((c for c in b2b_categories if c["id"] == resolved_product["category_id"]), None)
+            cat_path = get_breadcrumbs_for_category(b2b_categories, cat_ref["id"]) if cat_ref else []
+
+            product_clean = {
+                "id": resolved_product["id"],
+                "name": resolved_product["title"],
+                "slug": resolved_product["slug"],
+                "category": {
+                    "id": cat_ref["id"],
+                    "name": cat_ref["name"],
+                    "level": len(cat_path) - 1,
+                    "path": [t["name"] for t in cat_path]
+                } if cat_ref else None,
+                "min_price": resolved_product["price"],
+                "old_price": resolved_product.get("old_price"),
+                "has_stock": resolved_product.get("in_stock", True),
+                "rating": resolved_product.get("rating"),
+                "reviews_count": resolved_product.get("reviews_count", 0),
+                "subscribers": resolved_product.get("subscribers", 0),
+                "monthly_income": resolved_product.get("monthly_income", 0),
+                "er": resolved_product.get("er", 0.0),
+                "verified": resolved_product.get("verified", False),
+                "images": images_formatted,
+                "seller": resolved_product.get("seller")
+            }
+            
+            if not unavailable_reason:
+                subtotal = price * quantity
+                total_amount += subtotal
+                
+        enriched_items.append({
+            "sku_id": sku_id,
+            "quantity": quantity,
+            "sku": sku_clean,
+            "product": product_clean,
+            "unavailable_reason": unavailable_reason,
+            "price_at_addition": sku_clean["price"] if sku_clean else None,
+            "subtotal": subtotal
+        })
+        
+    return {
+        "items": enriched_items,
+        "total_amount": total_amount
+    }
+
+
+@app.get("/api/v1/cart", response_model=CartResponse)
+@app.get("/cart", response_model=CartResponse)
+def get_cart(
+    authorization: Optional[str] = Header(None),
+    x_session_id: Optional[str] = Header(None, alias="X-Session-Id"),
+    session_id: Optional[str] = Query(None),
+    x_simulate_b2b_outage: Optional[str] = Header(None, alias="X-Simulate-B2B-Outage")
+):
+    owner_id = get_cart_owner_id(authorization, x_session_id, session_id)
+    return _build_cart_response(owner_id, x_simulate_b2b_outage)
+
+
+@app.post("/api/v1/cart/items", response_model=CartResponse)
+@app.post("/cart/items", response_model=CartResponse)
+def add_cart_item(
+    payload: CartItemAddRequest,
+    authorization: Optional[str] = Header(None),
+    x_session_id: Optional[str] = Header(None, alias="X-Session-Id"),
+    session_id: Optional[str] = Query(None),
+    x_simulate_b2b_outage: Optional[str] = Header(None, alias="X-Simulate-B2B-Outage")
+):
+    owner_id = get_cart_owner_id(authorization, x_session_id, session_id)
+    
+    # Check if SKU exists at all in B2B raw database
+    raw_sku, raw_product = find_sku_and_product_in_b2b(b2b_client._products, payload.sku_id)
+    if not raw_sku:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "SKU_NOT_FOUND", "message": f"SKU with ID '{payload.sku_id}' not found"}
+        )
+        
+    user_cart = CART_DB.setdefault(owner_id, {})
+    
+    if payload.sku_id in user_cart:
+        user_cart[payload.sku_id] += payload.quantity
+    else:
+        user_cart[payload.sku_id] = payload.quantity
+        
+    return _build_cart_response(owner_id, x_simulate_b2b_outage)
+
+
+@app.put("/api/v1/cart/items/{sku_id}", response_model=CartResponse)
+@app.put("/cart/items/{sku_id}", response_model=CartResponse)
+@app.patch("/api/v1/cart/items/{sku_id}", response_model=CartResponse)
+@app.patch("/cart/items/{sku_id}", response_model=CartResponse)
+def update_cart_item(
+    sku_id: str,
+    payload: CartItemUpdateRequest,
+    authorization: Optional[str] = Header(None),
+    x_session_id: Optional[str] = Header(None, alias="X-Session-Id"),
+    session_id: Optional[str] = Query(None),
+    x_simulate_b2b_outage: Optional[str] = Header(None, alias="X-Simulate-B2B-Outage")
+):
+    owner_id = get_cart_owner_id(authorization, x_session_id, session_id)
+    
+    user_cart = CART_DB.get(owner_id, {})
+    if sku_id not in user_cart:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "ITEM_NOT_FOUND", "message": f"SKU with ID '{sku_id}' not found in cart"}
+        )
+        
+    user_cart[sku_id] = payload.quantity
+    return _build_cart_response(owner_id, x_simulate_b2b_outage)
+
+
+@app.delete("/api/v1/cart/items/{sku_id}")
+@app.delete("/cart/items/{sku_id}")
+def delete_cart_item(
+    sku_id: str,
+    authorization: Optional[str] = Header(None),
+    x_session_id: Optional[str] = Header(None, alias="X-Session-Id"),
+    session_id: Optional[str] = Query(None)
+):
+    owner_id = get_cart_owner_id(authorization, x_session_id, session_id)
+    
+    user_cart = CART_DB.get(owner_id, {})
+    if sku_id in user_cart:
+        del user_cart[sku_id]
+        
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.post("/api/v1/cart/merge", response_model=CartResponse)
+@app.post("/cart/merge", response_model=CartResponse)
+def merge_cart(
+    payload: Optional[CartMergeRequest] = None,
+    authorization: Optional[str] = Header(None),
+    x_session_id: Optional[str] = Header(None, alias="X-Session-Id"),
+    session_id: Optional[str] = Query(None),
+    x_simulate_b2b_outage: Optional[str] = Header(None, alias="X-Simulate-B2B-Outage")
+):
+    curr_user_id = str(get_user_id_from_auth(authorization))
+    
+    source_session_id = None
+    if payload and payload.session_id:
+        source_session_id = payload.session_id
+    elif x_session_id:
+        source_session_id = x_session_id
+    elif session_id:
+        source_session_id = session_id
+        
+    if not source_session_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "INVALID_REQUEST", "message": "session_id is required for merge"}
+        )
+        
+    guest_cart = CART_DB.get(source_session_id, {})
+    user_cart = CART_DB.setdefault(curr_user_id, {})
+    
+    for s_id, q_qty in guest_cart.items():
+        if s_id in user_cart:
+            user_cart[s_id] = max(user_cart[s_id], q_qty)
+        else:
+            user_cart[s_id] = q_qty
+            
+    if source_session_id in CART_DB:
+        del CART_DB[source_session_id]
+        
+    return _build_cart_response(curr_user_id, x_simulate_b2b_outage)
+
 

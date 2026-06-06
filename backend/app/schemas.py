@@ -172,3 +172,31 @@ class SubscriptionResponse(BaseModel):
 class SubscriptionsListResponse(BaseModel):
     items: List[SubscriptionResponse]
 
+
+class CartItemAddRequest(BaseModel):
+    sku_id: str
+    quantity: int = Field(default=1, ge=1)
+
+
+class CartItemUpdateRequest(BaseModel):
+    quantity: int = Field(..., ge=1)
+
+
+class CartItemResponse(BaseModel):
+    sku_id: str
+    quantity: int
+    sku: Optional[CatalogSku] = None
+    product: Optional[CatalogProductCard] = None
+    unavailable_reason: Optional[str] = None
+    price_at_addition: Optional[int] = None
+    subtotal: int = 0
+
+
+class CartResponse(BaseModel):
+    items: List[CartItemResponse]
+    total_amount: int
+
+
+class CartMergeRequest(BaseModel):
+    session_id: str
+
