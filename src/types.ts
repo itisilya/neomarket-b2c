@@ -120,3 +120,16 @@ export interface CartResponse {
 }
 
 
+export interface Banner {
+  id: string;
+  title: string;
+  image_url: string;
+  link_url: string;
+  priority: number;
+  is_active: boolean;
+  start_at: string | null;
+  end_at: string | null;
+}
+
+
+

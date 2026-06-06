@@ -31,7 +31,7 @@ class ImageRef(BaseModel):
     is_main: Optional[bool] = False
 
 class CatalogSku(BaseModel):
-    id: str
+    id: UUID
     name: str
     sku_code: str
     price: int # Price in kopecks
@@ -57,6 +57,8 @@ class CatalogProductCard(BaseModel):
     verified: bool
     images: List[ImageRef]
     seller: Optional[Dict[str, Any]] = None
+    skus: Optional[List[CatalogSku]] = None
+    added_at: Optional[str] = None
 
 class CatalogProductDetail(CatalogProductCard):
     description: str
@@ -158,7 +160,8 @@ class FavoritesResponse(BaseModel):
 
 
 class SubscriptionRequest(BaseModel):
-    notify_on: List[str]
+    events: Optional[List[str]] = Field(default=["BACK_IN_STOCK", "PRICE_DROP"])
+    notify_on: Optional[List[str]] = None
 
 
 class SubscriptionResponse(BaseModel):
@@ -166,6 +169,7 @@ class SubscriptionResponse(BaseModel):
     product_id: UUID
     user_id: UUID
     notify_on: List[str]
+    events: Optional[List[str]] = None
     created_at: str
 
 
@@ -174,7 +178,7 @@ class SubscriptionsListResponse(BaseModel):
 
 
 class CartItemAddRequest(BaseModel):
-    sku_id: str
+    sku_id: UUID
     quantity: int = Field(default=1, ge=1)
 
 
@@ -183,8 +187,19 @@ class CartItemUpdateRequest(BaseModel):
 
 
 class CartItemResponse(BaseModel):
-    sku_id: str
+    sku_id: UUID
+    product_id: UUID
+    name: str
+    sku_code: Optional[str] = None
     quantity: int
+    unit_price: int
+    unit_price_at_add: Optional[int] = None
+    line_total: int
+    available_quantity: int
+    is_available: bool
+    image: Optional[ImageRef] = None
+    
+    # UI compatibility
     sku: Optional[CatalogSku] = None
     product: Optional[CatalogProductCard] = None
     unavailable_reason: Optional[str] = None
@@ -193,10 +208,39 @@ class CartItemResponse(BaseModel):
 
 
 class CartResponse(BaseModel):
+    id: str  # ID корзины (owner_id)
     items: List[CartItemResponse]
+    items_count: int  # Сумма всех quantity
+    subtotal: int     # Общая сумма всех line_total
+    is_valid: bool
+    updated_at: str
+    
+    # UI compatibility
     total_amount: int
 
 
 class CartMergeRequest(BaseModel):
     session_id: str
+
+
+class BannerResponse(BaseModel):
+    id: UUID
+    title: str
+    image_url: str
+    link: str
+    ordering: int
+    active_from: str
+    active_to: str
+    
+    # UI compatibility
+    link_url: Optional[str] = None
+    priority: Optional[int] = None
+    is_active: Optional[bool] = None
+    start_at: Optional[str] = None
+    end_at: Optional[str] = None
+
+
+class BannerEventRequest(BaseModel):
+    banner_id: UUID
+    event_type: str
 

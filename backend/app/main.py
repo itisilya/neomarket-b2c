@@ -12,7 +12,8 @@ from app.schemas import (
     CategoryTreeNode, FlatCategoryItem,
     FavoriteResponse, FavoritesResponse,
     SubscriptionRequest, SubscriptionResponse, SubscriptionsListResponse,
-    CartItemAddRequest, CartItemUpdateRequest, CartItemResponse, CartResponse, CartMergeRequest
+    CartItemAddRequest, CartItemUpdateRequest, CartItemResponse, CartResponse, CartMergeRequest,
+    BannerResponse, BannerEventRequest
 )
 from app.b2b_client import B2BClient
 
@@ -409,10 +410,10 @@ def get_facets(
         ]
     )
 
-@app.get("/api/v1/catalog/products/{id}", response_model=CatalogProductDetail)
-@app.get("/api/v1/products/{id}", response_model=CatalogProductDetail)
+@app.get("/api/v1/catalog/products/{product_id}", response_model=CatalogProductDetail)
+@app.get("/api/v1/products/{product_id}", response_model=CatalogProductDetail)
 def get_product_detail(
-    id: UUID,
+    product_id: UUID,
     x_service_key: Optional[str] = Header(None, alias="X-Service-Key"),
     x_simulate_b2b_outage: Optional[str] = Header(None, alias="X-Simulate-B2B-Outage")
 ):
@@ -434,7 +435,7 @@ def get_product_detail(
             detail={"code": "B2B_UNAVAILABLE", "message": f"B2B service raised an integration fault: {str(e)}"}
         )
 
-    p = next((prod for prod in raw_products if prod["id"] == id), None)
+    p = next((prod for prod in raw_products if prod["id"] == product_id), None)
     if not p:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -458,7 +459,7 @@ def get_product_detail(
     if not raw_skus:
         # Provide a standard B2C sku mapping matching loaded cards
         raw_skus = [{
-            "id": f"sku-std-{p['id']}",
+            "id": p['id'],
             "name": "Полная передача прав (Базовый)",
             "sku_code": f"TG-{p['slug'].upper()}-BASE",
             "price": p["price"],
@@ -533,10 +534,10 @@ def get_product_detail(
     return CatalogProductDetail(**response_data)
 
 
-@app.get("/api/v1/catalog/products/{id}/similar", response_model=List[CatalogProductCard])
-@app.get("/api/v1/products/{id}/similar", response_model=List[CatalogProductCard])
+@app.get("/api/v1/catalog/products/{product_id}/similar", response_model=List[CatalogProductCard])
+@app.get("/api/v1/products/{product_id}/similar", response_model=List[CatalogProductCard])
 def get_similar_products(
-    id: UUID,
+    product_id: UUID,
     limit: int = Query(8, ge=1, le=20),
     x_service_key: Optional[str] = Header(None, alias="X-Service-Key"),
     x_simulate_b2b_outage: Optional[str] = Header(None, alias="X-Simulate-B2B-Outage")
@@ -558,7 +559,7 @@ def get_similar_products(
             detail={"code": "B2B_UNAVAILABLE", "message": f"B2B service raised an integration fault: {str(e)}"}
         )
 
-    p = next((prod for prod in raw_products if prod["id"] == id), None)
+    p = next((prod for prod in raw_products if prod["id"] == product_id), None)
     if not p:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -575,7 +576,7 @@ def get_similar_products(
 
     similar_set = []
     for prod in raw_products:
-        if prod["id"] == id:
+        if prod["id"] == product_id:
             continue
         # Only visible (status MODERATED, not deleted, active_quantity > 0)
         if prod.get("status") == "MODERATED" and not prod.get("deleted", False) and prod.get("active_quantity", 0) > 0:
@@ -899,8 +900,60 @@ def get_user_id_from_auth(authorization: Optional[str]) -> UUID:
         )
 
 
+@app.put("/api/v1/favorites/{product_id}", status_code=status.HTTP_204_NO_CONTENT)
+def add_to_favorites_put(
+    product_id: UUID,
+    user_id: Optional[UUID] = Query(None),  # Ignored for IDOR protection
+    authorization: Optional[str] = Header(None),
+    x_simulate_b2b_outage: Optional[str] = Header(None, alias="X-Simulate-B2B-Outage")
+):
+    # 1. JWT auth and extraction
+    curr_user_id = get_user_id_from_auth(authorization)
+    
+    # 2. Check outage
+    if x_simulate_b2b_outage == "true" or b2b_client.simulate_outage:
+         raise HTTPException(
+             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+             detail={"code": "B2B_UNAVAILABLE", "message": "B2B Service Unavailable"}
+         )
+         
+    # 3. Check if product exists in B2B database
+    try:
+        raw_products = b2b_client._products
+    except Exception as e:
+         raise HTTPException(
+             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+             detail={"code": "B2B_UNAVAILABLE", "message": f"B2B service error: {str(e)}"}
+         )
+         
+    product = next((p for p in raw_products if p["id"] == product_id), None)
+    if not product:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "NOT_FOUND", "message": "Product not found"}
+        )
+    
+    # 4. Handle addition
+    if curr_user_id not in FAVORITES_DB:
+        FAVORITES_DB[curr_user_id] = []
+        
+    user_favs = FAVORITES_DB[curr_user_id]
+    existing = next((f for f in user_favs if f["product_id"] == product_id), None)
+    
+    from datetime import datetime
+    now_str = datetime.utcnow().isoformat() + "Z"
+    
+    if not existing:
+        new_fav = {
+            "product_id": product_id,
+            "added_at": now_str
+        }
+        user_favs.append(new_fav)
+        
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @app.post("/api/v1/favorites/{product_id}", response_model=FavoriteResponse)
-@app.put("/api/v1/favorites/{product_id}", response_model=FavoriteResponse)
 def add_to_favorites(
     product_id: UUID,
     response: Response,
@@ -990,7 +1043,7 @@ def delete_from_favorites(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@app.get("/api/v1/favorites", response_model=FavoritesResponse)
+@app.get("/api/v1/favorites", response_model=PaginatedCatalogProducts)
 def get_favorites(
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
@@ -1048,7 +1101,7 @@ def get_favorites(
             raw_skus = p.get("skus", [])
             if not raw_skus:
                 raw_skus = [{
-                    "id": f"sku-std-{p['id']}",
+                    "id": p['id'],
                     "name": "Полная передача прав (Базовый)",
                     "sku_code": f"TG-{p['slug'].upper()}-BASE",
                     "price": p["price"],
@@ -1114,23 +1167,23 @@ def get_favorites(
     }
 
 
-def validate_notify_on(notify_on: Any):
+def validate_notify_on(notify_on: Any, field_name: str = "notify_on"):
     if not notify_on:  # empty or None
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"code": "INVALID_REQUEST", "message": "notify_on list must not be empty"}
+            detail={"code": "INVALID_REQUEST", "message": f"{field_name} list must not be empty"}
         )
     if not isinstance(notify_on, list):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"code": "INVALID_REQUEST", "message": "notify_on must be a list of strings"}
+            detail={"code": "INVALID_REQUEST", "message": f"{field_name} must be a list of strings"}
         )
     valid_events = {"PRICE_DROP", "BACK_IN_STOCK"}
     for item in notify_on:
         if not item or item not in valid_events:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail={"code": "INVALID_REQUEST", "message": f"Invalid notify_on event: '{item}'. Allowed: {list(valid_events)}"}
+                detail={"code": "INVALID_REQUEST", "message": f"Invalid {field_name} event: '{item}'. Allowed: {list(valid_events)}"}
             )
 
 
@@ -1144,9 +1197,8 @@ def get_subscriptions(
     return {"items": user_subs}
 
 
-@app.post("/api/v1/favorites/{product_id}/subscribe", status_code=status.HTTP_201_CREATED, response_model=SubscriptionResponse)
-@app.post("/api/v1/subscribe/{product_id}", status_code=status.HTTP_201_CREATED, response_model=SubscriptionResponse)
-def create_subscription(
+@app.post("/api/v1/favorites/{product_id}/subscribe", status_code=status.HTTP_204_NO_CONTENT)
+def create_subscription_openapi(
     product_id: UUID,
     payload: SubscriptionRequest,
     authorization: Optional[str] = Header(None)
@@ -1154,8 +1206,13 @@ def create_subscription(
     # 1. JWT auth and extraction
     curr_user_id = get_user_id_from_auth(authorization)
     
-    # 2. Validate notify_on
-    validate_notify_on(payload.notify_on)
+    # OpenAPI uses events instead of notify_on
+    events = payload.events if payload.events is not None else payload.notify_on
+    if events is None:
+        events = ["BACK_IN_STOCK", "PRICE_DROP"]
+        
+    # 2. Validate events
+    validate_notify_on(events, field_name="events")
     
     # 3. Check if product exists in B2B database
     try:
@@ -1195,7 +1252,63 @@ def create_subscription(
         "id": sub_id,
         "product_id": product_id,
         "user_id": curr_user_id,
-        "notify_on": payload.notify_on,
+        "notify_on": events,
+        "events": events,
+        "created_at": now_str
+    }
+    user_subs.append(new_sub)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.post("/api/v1/subscribe/{product_id}", status_code=status.HTTP_201_CREATED, response_model=SubscriptionResponse)
+def create_subscription_legacy(
+    product_id: UUID,
+    payload: SubscriptionRequest,
+    authorization: Optional[str] = Header(None)
+):
+    curr_user_id = get_user_id_from_auth(authorization)
+    events = payload.notify_on if payload.notify_on is not None else payload.events
+    if events is None:
+        events = ["BACK_IN_STOCK", "PRICE_DROP"]
+    validate_notify_on(events, field_name="notify_on")
+    
+    try:
+        raw_products = b2b_client._products
+    except Exception as e:
+         raise HTTPException(
+             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+             detail={"code": "B2B_UNAVAILABLE", "message": f"B2B service error: {str(e)}"}
+         )
+         
+    product = next((p for p in raw_products if p["id"] == product_id), None)
+    if not product:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "NOT_FOUND", "message": "Product not found"}
+        )
+        
+    if curr_user_id not in SUBSCRIPTIONS_DB:
+        SUBSCRIPTIONS_DB[curr_user_id] = []
+        
+    user_subs = SUBSCRIPTIONS_DB[curr_user_id]
+    existing = next((s for s in user_subs if s["product_id"] == product_id), None)
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "DUPLICATE_SUBSCRIPTION", "message": "Subscription for this product already exists"}
+        )
+        
+    import uuid
+    from datetime import datetime
+    sub_id = uuid.uuid4()
+    now_str = datetime.utcnow().isoformat() + "Z"
+    
+    new_sub = {
+        "id": sub_id,
+        "product_id": product_id,
+        "user_id": curr_user_id,
+        "notify_on": events,
+        "events": events,
         "created_at": now_str
     }
     user_subs.append(new_sub)
@@ -1235,13 +1348,14 @@ def unsubscribe_product(
 CART_DB: Dict[str, Dict[str, int]] = {}
 
 
-def find_sku_and_product_in_b2b(b2b_products: list, sku_id: str):
+def find_sku_and_product_in_b2b(b2b_products: list, sku_id: Any):
+    target_sku_str = str(sku_id)
     for p in b2b_products:
         raw_skus = p.get("skus", [])
         if not raw_skus:
             # Fallback SKU simulation
-            fallback_sku_id = f"sku-std-{p['id']}"
-            if fallback_sku_id == sku_id:
+            fallback_sku_id = p['id']
+            if str(fallback_sku_id) == target_sku_str:
                 fallback_sku = {
                     "id": fallback_sku_id,
                     "name": "Полная передача прав (Базовый)",
@@ -1255,9 +1369,9 @@ def find_sku_and_product_in_b2b(b2b_products: list, sku_id: str):
                 return fallback_sku, p
         else:
             for s in raw_skus:
-                if str(s.get("id")) == sku_id:
+                if str(s.get("id")) == target_sku_str:
                     sku_data = {
-                        "id": str(s.get("id")),
+                        "id": s.get("id"),
                         "name": s["name"],
                         "sku_code": s["sku_code"],
                         "price": s["price"],
@@ -1328,6 +1442,16 @@ def _build_cart_response(owner_id: str, x_simulate_b2b_outage: Optional[str] = N
         elif not active_sku or not active_product:
             unavailable_reason = "UNAVAILABLE"
             
+        product_id = "00000000-0000-0000-0000-000000000000"
+        name = "Unknown Product"
+        sku_code = None
+        unit_price = 0
+        unit_price_at_add = None
+        line_total = 0
+        available_quantity = 0
+        is_available = (unavailable_reason is None)
+        image = None
+
         sku_clean = None
         product_clean = None
         subtotal = 0
@@ -1401,23 +1525,56 @@ def _build_cart_response(owner_id: str, x_simulate_b2b_outage: Optional[str] = N
                 "seller": resolved_product.get("seller")
             }
             
+            product_id = resolved_product["id"]
+            name = f"{resolved_product['title']} - {resolved_sku['name']}"
+            sku_code = resolved_sku.get("sku_code")
+            unit_price = price
+            unit_price_at_add = price
+            available_quantity = resolved_sku.get("available_quantity", resolved_sku.get("active_quantity", 0))
+            if sku_images_formatted:
+                image = sku_images_formatted[0]
+            
             if not unavailable_reason:
-                subtotal = price * quantity
-                total_amount += subtotal
+                line_total = price * quantity
+                total_amount += line_total
                 
         enriched_items.append({
             "sku_id": sku_id,
+            "product_id": product_id,
+            "name": name,
+            "sku_code": sku_code,
             "quantity": quantity,
+            "unit_price": unit_price,
+            "unit_price_at_add": unit_price_at_add,
+            "line_total": line_total,
+            "available_quantity": available_quantity,
+            "is_available": is_available,
+            "image": image,
+            
+            # UI compatibility
             "sku": sku_clean,
             "product": product_clean,
             "unavailable_reason": unavailable_reason,
-            "price_at_addition": sku_clean["price"] if sku_clean else None,
-            "subtotal": subtotal
+            "price_at_addition": unit_price if sku_clean else None,
+            "subtotal": line_total
         })
         
+    items_count = sum(item["quantity"] for item in enriched_items)
+    subtotal_total = sum(item["line_total"] for item in enriched_items)
+    is_valid = all(item["is_available"] and item["quantity"] <= item["available_quantity"] for item in enriched_items)
+    from datetime import datetime
+    updated_at_str = datetime.utcnow().isoformat() + "Z"
+
     return {
+        "id": owner_id,
         "items": enriched_items,
-        "total_amount": total_amount
+        "items_count": items_count,
+        "subtotal": subtotal_total,
+        "is_valid": is_valid,
+        "updated_at": updated_at_str,
+        
+        # UI compatibility
+        "total_amount": subtotal_total
     }
 
 
@@ -1509,7 +1666,7 @@ def delete_cart_item(
 def merge_cart(
     payload: Optional[CartMergeRequest] = None,
     authorization: Optional[str] = Header(None),
-    x_session_id: Optional[str] = Header(None, alias="X-Session-Id"),
+    x_session_id: str = Header(..., alias="X-Session-Id"),
     session_id: Optional[str] = Query(None),
     x_simulate_b2b_outage: Optional[str] = Header(None, alias="X-Simulate-B2B-Outage")
 ):
@@ -1544,3 +1701,121 @@ def merge_cart(
     return _build_cart_response(curr_user_id, x_simulate_b2b_outage)
 
 
+# --- US-CART-04: Banners & CTR Analytics ---
+from datetime import datetime, timezone
+
+BANNERS_DB: List[Dict[str, Any]] = [
+    {
+        "id": UUID("ba123456-1111-4444-8888-000000000001"),
+        "title": "🔥 Эксклюзивные скидки на IT-каналы! Сэкономьте до 15% на этой неделе.",
+        "image_url": "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=1200&auto=format&fit=crop&q=80",
+        "link_url": "/catalog/it-tech",
+        "priority": 50,
+        "is_active": True,
+        "start_at": "2026-06-01T00:00:00Z",
+        "end_at": "2026-06-30T23:59:59Z",
+    },
+    {
+        "id": UUID("ba123456-2222-4444-8888-000000000002"),
+        "title": "🐳 Crypto Whale VIP: получите передачу прав и 7 дней обучения бесплатно!",
+        "image_url": "https://images.unsplash.com/photo-1639762681485-074b7f938ba0?w=1200&auto=format&fit=crop&q=80",
+        "link_url": "/catalog/products/770e8400-e29b-41d4-a716-446655440001",
+        "priority": 100,
+        "is_active": True,
+        "start_at": "2026-06-01T00:00:00Z",
+        "end_at": "2026-06-30T23:59:59Z",
+    },
+    {
+        "id": UUID("ba123456-3333-4444-8888-000000000003"),
+        "title": "📚 Скидка на образовательные каналы! Учите языки просто",
+        "image_url": "https://images.unsplash.com/photo-1516321318423-f06f85e504b3?w=1200&auto=format&fit=crop&q=80",
+        "link_url": "/catalog/languages",
+        "priority": 20,
+        "is_active": True,
+        "start_at": "2026-06-01T00:00:00Z",
+        "end_at": "2026-06-30T23:59:59Z",
+    },
+    {
+        "id": UUID("ba123456-4444-4444-8888-000000000004"),
+        "title": "Черный список (неактивный баннер)",
+        "image_url": "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=1200",
+        "link_url": "/",
+        "priority": 150,
+        "is_active": False,
+        "start_at": "2026-06-01T00:00:00Z",
+        "end_at": "2026-06-30T23:59:59Z",
+    },
+    {
+        "id": UUID("ba123456-5555-4444-8888-000000000005"),
+        "title": "Будущая акция (не началась)",
+        "image_url": "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=1200",
+        "link_url": "/",
+        "priority": 200,
+        "is_active": True,
+        "start_at": "2026-07-01T00:00:00Z",
+        "end_at": "2026-07-31T23:59:59Z",
+    }
+]
+
+BANNER_EVENTS_LOG: List[Dict[str, Any]] = []
+
+def parse_iso_datetime(dt_str: Optional[str]) -> Optional[datetime]:
+    if not dt_str:
+        return None
+    try:
+        cleaned = dt_str.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(cleaned)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+def is_banner_active(banner: dict, now: datetime) -> bool:
+    if not banner.get("is_active", True):
+        return False
+    start_dt = parse_iso_datetime(banner.get("start_at"))
+    end_dt = parse_iso_datetime(banner.get("end_at"))
+    
+    if start_dt and now < start_dt:
+        return False
+    if end_dt and now > end_dt:
+        return False
+    return True
+
+@app.get("/api/v1/catalog/banners", response_model=List[BannerResponse])
+@app.get("/catalog/banners", response_model=List[BannerResponse])
+@app.get("/api/v1/home/banners", response_model=List[BannerResponse])
+@app.get("/home/banners", response_model=List[BannerResponse])
+def get_banners():
+    now = datetime.now(timezone.utc)
+    active_banners = [b for b in BANNERS_DB if is_banner_active(b, now)]
+    active_banners.sort(key=lambda b: b["priority"])
+    
+    enriched = []
+    for b in active_banners:
+        item = dict(b)
+        item["link"] = b.get("link_url", "")
+        item["ordering"] = b.get("priority", 0)
+        item["active_from"] = b.get("start_at")
+        item["active_to"] = b.get("end_at")
+        enriched.append(item)
+    return enriched
+
+@app.post("/api/v1/banner-events", status_code=status.HTTP_201_CREATED)
+@app.post("/banner-events", status_code=status.HTTP_201_CREATED)
+def post_banner_event(payload: BannerEventRequest):
+    banner_exists = any(b["id"] == payload.banner_id for b in BANNERS_DB)
+    if not banner_exists:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "BANNER_NOT_FOUND", "message": f"Banner with ID '{payload.banner_id}' not found"}
+        )
+    
+    event_log = {
+        "banner_id": payload.banner_id,
+        "event_type": payload.event_type.upper(),
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+    BANNER_EVENTS_LOG.append(event_log)
+    return {"status": "ok", "message": "Event logged successfully"}

@@ -63,6 +63,10 @@ export default function App() {
   const [authMode, setAuthMode] = useState<"authorized" | "guest">("authorized");
   const [sessionId, setSessionId] = useState<string>("");
   
+  // US-CART-04: Banners & CTR Analytics state
+  const [banners, setBanners] = useState<any[]>([]);
+  const [activeBannerIndex, setActiveBannerIndex] = useState(0);
+  
   // Real B2C Favorites Database Integration
   const MOCK_JWT = "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhMTExMTExMS1lMjliLTQxZDQtYTcxNi00NDY2NTU0NDAwMDEifQ.mock-signature";
   const [activeTab, setActiveTab] = useState<"catalog" | "favorites">("catalog");
@@ -167,6 +171,38 @@ export default function App() {
     }
   };
 
+  const loadBanners = async () => {
+    try {
+      const res = await fetch("/api/v1/catalog/banners");
+      if (res.ok) {
+        const data = await res.json();
+        setBanners(data);
+        if (data && data.length > 0) {
+          handleBannerEvent(data[0].id, "IMPRESSION");
+        }
+      }
+    } catch (err) {
+      console.error("Failed to load home banners:", err);
+    }
+  };
+
+  const handleBannerEvent = async (bannerId: string, eventType: "CLICK" | "IMPRESSION") => {
+    try {
+      await fetch("/api/v1/banner-events", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          banner_id: bannerId,
+          event_type: eventType
+        })
+      });
+    } catch (err) {
+      console.error("Failed sending banner analytical event:", err);
+    }
+  };
+
   useEffect(() => {
     let sId = localStorage.getItem("b2c_session_id");
     if (!sId) {
@@ -178,6 +214,7 @@ export default function App() {
     loadFavorites();
     loadSubscriptions();
     loadCart(authMode, sId);
+    loadBanners();
   }, [authMode]);
 
   const handleToggleFavorite = async (productId: string, e?: React.MouseEvent) => {
@@ -590,19 +627,110 @@ export default function App() {
               {/* Right Hand: Catalog Grid, Search, and Tools */}
               <div className="lg:col-span-3 space-y-6">
                 
-                {/* Header Promo Banner */}
-                <div className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-slate-900 via-slate-950 to-slate-950 p-6 md:p-8 text-white border border-slate-800 shadow-xl">
-                  <div className="absolute top-0 right-0 h-full w-48 bg-radial-at-t from-cyan-500/15 via-transparent to-transparent pointer-events-none" />
-                  <div className="max-w-xl">
-                    <span className="text-[10px] font-bold uppercase tracking-widest text-cyan-400 bg-cyan-950/80 px-2 py-1 rounded inline-block border border-cyan-900/50">Портал Покупки Каналов</span>
-                    <h1 className="mt-3.5 font-sans text-xl md:text-2xl font-black text-white leading-tight">
-                      Инвестируйте в готовый медиабизнес безопасно
-                    </h1>
-                    <p className="mt-2 text-xs text-slate-350 leading-relaxed">
-                      Все выставленные Telegram-каналы прошли полную модерацию и аудит вовлеченности (ER) нашими кураторами. Простая сделка "под ключ" через Безопасный Гарант.
-                    </p>
+                {/* Promo Banner Slider (US-CART-04) */}
+                {banners && banners.length > 0 ? (
+                  <div className="relative overflow-hidden rounded-2xl bg-slate-950 h-52 md:h-60 border border-slate-800/80 shadow-2xl group transition-all duration-300">
+                    {/* Background image component */}
+                    <div 
+                      className="absolute inset-0 bg-cover bg-center transition-all duration-700 ease-in-out scale-102 group-hover:scale-105 opacity-85" 
+                      style={{ backgroundImage: `url(${banners[activeBannerIndex]?.image_url})` }}
+                    />
+                    
+                    {/* Dark gradient overlay covering left side deeply */}
+                    <div className="absolute inset-0 bg-gradient-to-r from-slate-950/95 via-slate-950/70 to-slate-950/30 md:to-transparent pointer-events-none" />
+                    
+                    {/* Glow effect */}
+                    <div className="absolute top-0 right-0 h-full w-64 bg-radial-at-t from-cyan-500/10 via-transparent to-transparent pointer-events-none" />
+
+                    {/* Content Layer */}
+                    <div className="absolute inset-0 flex flex-col justify-between p-6 md:p-8 z-10">
+                      <div>
+                        {/* Super Header Tag */}
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[9px] font-black uppercase tracking-wider text-cyan-400 bg-cyan-950/80 border border-cyan-850 px-2 py-0.5 rounded-md">
+                            Промоакция B2C
+                          </span>
+                          <span className="text-[9px] font-mono text-slate-400">
+                            Приоритет: {banners[activeBannerIndex]?.priority}
+                          </span>
+                        </div>
+
+                        {/* Slide Title */}
+                        <h2 className="mt-4 font-sans text-lg md:text-2xl font-black text-white leading-snug max-w-xl transition-all duration-300">
+                          {banners[activeBannerIndex]?.title}
+                        </h2>
+                      </div>
+
+                      <div className="flex items-center justify-between mt-2">
+                        {/* Call to Action Button */}
+                        <a
+                          href={banners[activeBannerIndex]?.link_url}
+                          onClick={() => handleBannerEvent(banners[activeBannerIndex]?.id, "CLICK")}
+                          className="inline-flex items-center gap-1.5 px-4.5 py-1.5 rounded-xl bg-cyan-500 text-slate-950 text-xs font-black uppercase tracking-wider transition-all hover:bg-cyan-400 active:scale-95 shadow-lg shadow-cyan-500/10"
+                        >
+                          Перейти к акции <ChevronRight className="h-3.5 w-3.5" />
+                        </a>
+
+                        {/* Dot Navigation & Switchers */}
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={(e) => {
+                              e.preventDefault();
+                              const newIndex = (activeBannerIndex - 1 + banners.length) % banners.length;
+                              setActiveBannerIndex(newIndex);
+                              handleBannerEvent(banners[newIndex].id, "IMPRESSION");
+                            }}
+                            className="flex h-7 w-7 items-center justify-center rounded-lg bg-slate-900/90 border border-slate-800 text-slate-400 hover:text-white transition-all active:scale-90"
+                          >
+                            &larr;
+                          </button>
+                          
+                          {/* Dots */}
+                          <div className="flex gap-1">
+                            {banners.map((_, idx) => (
+                              <button
+                                key={idx}
+                                onClick={() => {
+                                  if (idx !== activeBannerIndex) {
+                                    setActiveBannerIndex(idx);
+                                    handleBannerEvent(banners[idx].id, "IMPRESSION");
+                                  }
+                                }}
+                                className={`h-1.5 transition-all rounded-full ${idx === activeBannerIndex ? "w-4 bg-cyan-400" : "w-1.5 bg-slate-750"}`}
+                              />
+                            ))}
+                          </div>
+
+                          <button
+                            onClick={(e) => {
+                              e.preventDefault();
+                              const newIndex = (activeBannerIndex + 1) % banners.length;
+                              setActiveBannerIndex(newIndex);
+                              handleBannerEvent(banners[newIndex].id, "IMPRESSION");
+                            }}
+                            className="flex h-7 w-7 items-center justify-center rounded-lg bg-slate-900/90 border border-slate-800 text-slate-400 hover:text-white transition-all active:scale-90"
+                          >
+                            &rarr;
+                          </button>
+                        </div>
+                      </div>
+                    </div>
                   </div>
-                </div>
+                ) : (
+                  /* Header Promo Dummy Fallback Banner */
+                  <div className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-slate-900 via-slate-950 to-slate-950 p-6 md:p-8 text-white border border-slate-800 shadow-xl">
+                    <div className="absolute top-0 right-0 h-full w-48 bg-radial-at-t from-cyan-500/15 via-transparent to-transparent pointer-events-none" />
+                    <div className="max-w-xl">
+                      <span className="text-[10px] font-bold uppercase tracking-widest text-cyan-400 bg-cyan-950/80 px-2 py-1 rounded inline-block border border-cyan-900/50">Портал Покупки Каналов</span>
+                      <h1 className="mt-3.5 font-sans text-xl md:text-2xl font-black text-white leading-tight">
+                        Инвестируйте в готовый медиабизнес безопасно
+                      </h1>
+                      <p className="mt-2 text-xs text-slate-400 leading-relaxed">
+                        Все выставленные Telegram-каналы прошли полную модерацию и аудит вовлеченности (ER) нашими кураторами. Простая сделка "под ключ" через Безопасный Гарант.
+                      </p>
+                    </div>
+                  </div>
+                )}
 
                 {/* Dynamic Search Box & Sort Selection */}
                 <div className="flex flex-col gap-3 rounded-2xl border border-slate-800 bg-slate-900/40 p-4 shadow-lg glass sm:flex-row sm:items-center sm:justify-between">
