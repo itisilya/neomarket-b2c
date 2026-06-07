@@ -1402,3 +1402,144 @@ def test_other_user_order_returns_404():
     )
     assert cancel_response.status_code == 404
     assert cancel_response.json()["code"] == "ORDER_NOT_FOUND"
+
+
+def test_missing_service_key_returns_401():
+    idempotency_key = "12345678-abcd-ef01-2345-6789abcdef01"
+    payload = {
+        "idempotency_key": idempotency_key,
+        "event": "PRODUCT_BLOCKED",
+        "product_id": "550e8400-e29b-41d4-a716-446655440000",
+        "sku_ids": ["00000000-0000-0000-0000-000000000001"],
+        "reason": "Test missing token",
+        "date": "2026-04-16T12:00:00Z"
+    }
+    response = client.post("/api/v1/events/product", json=payload)
+    assert response.status_code == 401
+    assert response.json()["code"] == "UNAUTHORIZED"
+
+
+def test_idempotent_event_no_side_effects():
+    idempotency_key = "22222222-abcd-ef01-2345-6789abcdef22"
+    payload = {
+        "idempotency_key": idempotency_key,
+        "event": "PRODUCT_BLOCKED",
+        "product_id": "550e8400-e29b-41d4-a716-446655440000",
+        "sku_ids": ["00000000-0000-0000-0000-000000000001"],
+        "reason": "Test idempotency",
+        "date": "2026-04-16T12:00:00Z"
+    }
+    response1 = client.post(
+        "/api/v1/events/product",
+        json=payload,
+        headers={"X-Service-Key": "B2B_SECRET_KEY_PROD_2026"}
+    )
+    assert response1.status_code == 200
+    
+    response2 = client.post(
+        "/api/v1/events/product",
+        json=payload,
+        headers={"X-Service-Key": "B2B_SECRET_KEY_PROD_2026"}
+    )
+    assert response2.status_code == 200
+
+
+def test_product_blocked_marks_cart_items_unavailable():
+    from app.main import B2B_EVENTS_UNAVAILABLE_REASONS
+    B2B_EVENTS_UNAVAILABLE_REASONS.clear()
+    sku_id = "00000000-0000-0000-0000-000000000001"
+    user_id = "99999999-e29b-41d4-a716-446655449999"
+    token = create_mock_jwt(user_id)
+    
+    add_response = client.post(
+        "/api/v1/cart/items",
+        json={"sku_id": sku_id, "quantity": 1},
+        headers={"Authorization": token}
+    )
+    assert add_response.status_code == 200
+    
+    data = add_response.json()
+    assert len(data["items"]) >= 1
+    target_item = next((item for item in data["items"] if item["sku_id"] == sku_id), None)
+    assert target_item is not None
+    assert target_item["is_available"] is True
+    assert target_item["unavailable_reason"] is None
+    
+    idempotency_key = "33333333-abcd-ef01-2345-6789abcdef33"
+    payload = {
+        "idempotency_key": idempotency_key,
+        "event": "PRODUCT_BLOCKED",
+        "product_id": "770e8400-e29b-41d4-a716-446655440001",
+        "sku_ids": [sku_id],
+        "reason": "Test blocking product in cart",
+        "date": "2026-04-16T12:00:00Z"
+    }
+    event_response = client.post(
+        "/api/v1/events/product",
+        json=payload,
+        headers={"X-Service-Key": "B2B_SECRET_KEY_PROD_2026"}
+    )
+    assert event_response.status_code == 200
+    
+    cart_response = client.get(
+        "/api/v1/cart",
+        headers={"Authorization": token}
+    )
+    assert cart_response.status_code == 200
+    cart_data = cart_response.json()
+    target_item_after = next((item for item in cart_data["items"] if item["sku_id"] == sku_id), None)
+    assert target_item_after is not None
+    assert target_item_after["is_available"] is False
+    assert target_item_after["unavailable_reason"] == "PRODUCT_BLOCKED"
+
+
+def test_orders_not_affected_by_product_blocked():
+    from app.main import B2B_EVENTS_UNAVAILABLE_REASONS
+    B2B_EVENTS_UNAVAILABLE_REASONS.clear()
+    sku_id = "00000000-0000-0000-0000-000000000001"
+    user_id = "88888888-e29b-41d4-a716-446655448888"
+    token = create_mock_jwt(user_id)
+    idempotency_key = "44444444-abcd-ef01-2345-6789abcdef44"
+    
+    order_response = client.post(
+        "/api/v1/orders",
+        json={
+            "idempotency_key": idempotency_key,
+            "items": [{"sku_id": sku_id, "quantity": 1}],
+            "address_id": "e2020000-e29b-41d4-a716-446655440001",
+            "payment_method_id": "e3030000-e29b-41d4-a716-446655440001"
+        },
+        headers={"Authorization": token, "Idempotency-Key": idempotency_key}
+    )
+    assert order_response.status_code == 201
+    order_data = order_response.json()
+    order_id = order_data["id"]
+    
+    assert len(order_data["items"]) >= 1
+    assert order_data["items"][0]["sku_id"] == sku_id
+    
+    block_idempotency_key = "55555555-abcd-ef01-2345-6789abcdef55"
+    payload = {
+        "idempotency_key": block_idempotency_key,
+        "event": "PRODUCT_BLOCKED",
+        "product_id": "770e8400-e29b-41d4-a716-446655440001",
+        "sku_ids": [sku_id],
+        "reason": "Ensure older orders are not affected",
+        "date": "2026-04-16T12:00:00Z"
+    }
+    event_response = client.post(
+        "/api/v1/events/product",
+        json=payload,
+        headers={"X-Service-Key": "B2B_SECRET_KEY_PROD_2026"}
+    )
+    assert event_response.status_code == 200
+    
+    get_order_response = client.get(
+        f"/api/v1/orders/{order_id}",
+        headers={"Authorization": token}
+    )
+    assert get_order_response.status_code == 200
+    get_order_data = get_order_response.json()
+    assert len(get_order_data["items"]) >= 1
+    assert get_order_data["items"][0]["sku_id"] == sku_id
+    assert get_order_data["status"] == "PAID"

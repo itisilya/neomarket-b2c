@@ -854,6 +854,11 @@ def get_category_details(
 # Key: user_id (UUID), Value: List of Dict containing product_id (UUID) and added_at (str)
 FAVORITES_DB: Dict[UUID, List[Dict[str, Any]]] = {}
 
+# Simulated B2C database for physical B2B events status
+# Key: sku_id (UUID), Value: unavailable_reason string (e.g., "PRODUCT_BLOCKED", "PRODUCT_DELETED", "OUT_OF_STOCK")
+B2B_EVENTS_UNAVAILABLE_REASONS: Dict[UUID, str] = {}
+PROCESSED_B2B_EVENTS_KEYS = set()
+
 # Simulated B2C database for subscriptions
 # Key: user_id (UUID), Value: List of Dict containing id (UUID), product_id (UUID), notify_on (List[str]), and created_at (str)
 SUBSCRIPTIONS_DB: Dict[UUID, List[Dict[str, Any]]] = {}
@@ -1462,7 +1467,10 @@ def _build_cart_response(owner_id: str, x_simulate_b2b_outage: Optional[str] = N
         active_sku, active_product = find_sku_and_product_in_b2b(b2b_products, sku_id)
         
         unavailable_reason = None
-        if not raw_sku or not raw_product:
+        local_reason = B2B_EVENTS_UNAVAILABLE_REASONS.get(UUID(sku_id) if isinstance(sku_id, str) else sku_id)
+        if local_reason:
+            unavailable_reason = local_reason
+        elif not raw_sku or not raw_product:
             unavailable_reason = "SKU_NOT_FOUND"
         elif raw_product.get("deleted", False):
             unavailable_reason = "DELETED"
@@ -2286,3 +2294,78 @@ def cancel_order(
     order["status_history"].append({"status": "CANCELLED", "changed_at": now_iso, "reason": reason_msg})
     order["cancel_reason"] = reason_str
     return order
+
+
+@app.post("/api/v1/events/product")
+@app.post("/api/v1/b2b/events")
+async def handle_b2b_product_event(
+    request: Request,
+    x_service_key: Optional[str] = Header(None, alias="X-Service-Key")
+):
+    if not x_service_key or x_service_key != "B2B_SECRET_KEY_PROD_2026":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "UNAUTHORIZED", "message": "Invalid or missing X-Service-Key"}
+        )
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "INVALID_REQUEST", "message": "Invalid JSON body"}
+        )
+
+    idempotency_key = body.get("idempotency_key")
+    if idempotency_key:
+        id_str = str(idempotency_key)
+        if id_str in PROCESSED_B2B_EVENTS_KEYS:
+            return {"accepted": True}
+        PROCESSED_B2B_EVENTS_KEYS.add(id_str)
+
+    event_type = body.get("event") or body.get("event_type")
+    product_id = body.get("product_id")
+    sku_ids = body.get("sku_ids")
+
+    # Check nested payload in case of OpenAPI format
+    payload_dict = body.get("payload")
+    if isinstance(payload_dict, dict):
+        if not product_id:
+            product_id = payload_dict.get("product_id") or payload_dict.get("id")
+        if not sku_ids:
+            sku_id = payload_dict.get("sku_id")
+            if sku_id:
+                sku_ids = [sku_id]
+            else:
+                sku_ids = payload_dict.get("sku_ids")
+
+    resolved_sku_ids = []
+    if sku_ids:
+        resolved_sku_ids = [str(sid) for sid in sku_ids]
+    elif product_id:
+        p_id_str = str(product_id).lower()
+        b2b_products = b2b_client._products
+        prod = next((p for p in b2b_products if str(p.get("id")).lower() == p_id_str), None)
+        if prod:
+            raw_skus = prod.get("skus", [])
+            if raw_skus:
+                resolved_sku_ids = [str(s.get("id")) for s in raw_skus]
+            else:
+                resolved_sku_ids = [p_id_str]  # fallback sku matches product_id
+
+    reason_map = {
+        "PRODUCT_BLOCKED": "PRODUCT_BLOCKED",
+        "PRODUCT_HARD_BLOCKED": "PRODUCT_BLOCKED",
+        "PRODUCT_DELETED": "PRODUCT_DELETED",
+        "SKU_OUT_OF_STOCK": "OUT_OF_STOCK"
+    }
+
+    reason = reason_map.get(event_type, "UNAVAILABLE")
+
+    for sid in resolved_sku_ids:
+        try:
+            B2B_EVENTS_UNAVAILABLE_REASONS[UUID(sid)] = reason
+        except Exception:
+            pass
+
+    return {"accepted": True}
