@@ -1096,4 +1096,162 @@ def test_b2b_unavailable_returns_503():
     assert response.status_code == 503
     data = response.json()
     assert data["code"] == "B2B_UNAVAILABLE"
+
+
+def test_orders_list_returns_own_orders_paginated():
+    """
+    happy: orders_list_returns_own_orders_paginated
+    - Получение списка своих заказов с пагинацией
+    """
+    from app.main import ORDERS_DB
+    from uuid import UUID
+    user_id = "a1111111-e29b-41d4-a716-446655449901"
+    token = create_mock_jwt(user_id)
     
+    # Clean orders for this user
+    for k in list(ORDERS_DB.keys()):
+        if ORDERS_DB[k].get("buyer_id") == UUID(user_id) or ORDERS_DB[k].get("user_id") == UUID(user_id):
+            del ORDERS_DB[k]
+            
+    sku_id = "00000000-0000-0000-0000-000000000001"
+    
+    response1 = client.post(
+        "/api/v1/orders",
+        json={
+            "idempotency_key": "10000000-1111-2222-3333-444444444441",
+            "items": [{"sku_id": sku_id, "quantity": 1}],
+            "address_id": "e2020000-e29b-41d4-a716-446655440001",
+            "payment_method_id": "e3030000-e29b-41d4-a716-446655440001"
+        },
+        headers={"Authorization": token, "Idempotency-Key": "10000000-1111-2222-3333-444444444441"}
+    )
+    assert response1.status_code == 201
+    
+    response2 = client.post(
+        "/api/v1/orders",
+        json={
+            "idempotency_key": "10000000-1111-2222-3333-444444444442",
+            "items": [{"sku_id": sku_id, "quantity": 1}],
+            "address_id": "e2020000-e29b-41d4-a716-446655440001",
+            "payment_method_id": "e3030000-e29b-41d4-a716-446655440001"
+        },
+        headers={"Authorization": token, "Idempotency-Key": "10000000-1111-2222-3333-444444444442"}
+    )
+    assert response2.status_code == 201
+    
+    # Now list with limit=1, offset=0
+    list_response1 = client.get(
+        "/api/v1/orders?limit=1&offset=0",
+        headers={"Authorization": token}
+    )
+    assert list_response1.status_code == 200
+    data1 = list_response1.json()
+    assert data1["total_count"] == 2
+    assert len(data1["items"]) == 1
+    assert data1["limit"] == 1
+    assert data1["offset"] == 0
+    
+    # List with limit=1, offset=1
+    list_response2 = client.get(
+        "/api/v1/orders?limit=1&offset=1",
+        headers={"Authorization": token}
+    )
+    assert list_response2.status_code == 200
+    data2 = list_response2.json()
+    assert data2["total_count"] == 2
+    assert len(data2["items"]) == 1
+    assert data2["limit"] == 1
+    assert data2["offset"] == 1
+    
+    assert data1["items"][0]["id"] != data2["items"][0]["id"]
+
+
+def test_order_detail_shows_fixed_prices():
+    """
+    happy: order_detail_shows_fixed_prices
+    - unit_price в OrderItem не изменился после правки цены SKU.
+    """
+    from app.main import b2b_client
+    user_id = "a1111111-e29b-41d4-a716-446655449902"
+    token = create_mock_jwt(user_id)
+    sku_id = "00000000-0000-0000-0000-000000000001"
+    idempotency_key = "20000000-1111-2222-3333-444444444441"
+    
+    # 1. Check current price in B2B
+    orig_b2b_price = 15000000
+    found_sku = None
+    for p in b2b_client._products:
+        for s in p.get("skus", []):
+            if str(s.get("id")) == sku_id:
+                found_sku = s
+                orig_b2b_price = s["price"]
+                break
+    
+    # 2. Place order
+    response = client.post(
+        "/api/v1/orders",
+        json={
+            "idempotency_key": idempotency_key,
+            "items": [{"sku_id": sku_id, "quantity": 1}],
+            "address_id": "e2020000-e29b-41d4-a716-446655440001",
+            "payment_method_id": "e3030000-e29b-41d4-a716-446655440001"
+        },
+        headers={"Authorization": token, "Idempotency-Key": idempotency_key}
+    )
+    assert response.status_code == 201
+    order = response.json()
+    order_id = order["id"]
+    
+    # 3. Change price in B2B mock state
+    if found_sku:
+        found_sku["price"] = 99999999
+        
+    try:
+        # 4. Get order details and see if unit_price is still the old one
+        detail_response = client.get(
+            f"/api/v1/orders/{order_id}",
+            headers={"Authorization": token}
+        )
+        assert detail_response.status_code == 200
+        detail_data = detail_response.json()
+        assert detail_data["items"][0]["unit_price"] == orig_b2b_price
+    finally:
+        # Restore original B2B price mock state
+        if found_sku:
+            found_sku["price"] = orig_b2b_price
+
+
+def test_other_user_order_returns_404_not_403():
+    """
+    unhappy: other_user_order_returns_404_not_403
+    - IDOR: чужой заказ -> 404
+    """
+    user_a = "a1111111-e29b-41d4-a716-446655449903"
+    user_b = "b1111111-e29b-41d4-a716-446655449904"
+    token_a = create_mock_jwt(user_a)
+    token_b = create_mock_jwt(user_b)
+    
+    sku_id = "00000000-0000-0000-0000-000000000001"
+    idempotency_key = "30000000-1111-2222-3333-444444444441"
+    
+    # 1. User A places an order
+    response = client.post(
+        "/api/v1/orders",
+        json={
+            "idempotency_key": idempotency_key,
+            "items": [{"sku_id": sku_id, "quantity": 1}],
+            "address_id": "e2020000-e29b-41d4-a716-446655440001",
+            "payment_method_id": "e3030000-e29b-41d4-a716-446655440001"
+        },
+        headers={"Authorization": token_a, "Idempotency-Key": idempotency_key}
+    )
+    assert response.status_code == 201
+    order_id = response.json()["id"]
+    
+    # 2. User B tries to get details of User A's order -> must be 404 Not Found, never 403 Forbidden!
+    response_b = client.get(
+        f"/api/v1/orders/{order_id}",
+        headers={"Authorization": token_b}
+    )
+    assert response_b.status_code == 404
+    assert response_b.json()["code"] == "ORDER_NOT_FOUND"
