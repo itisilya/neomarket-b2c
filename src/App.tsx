@@ -88,6 +88,7 @@ export default function App() {
   const [orders, setOrders] = useState<any[]>([]);
   const [ordersLoading, setOrdersLoading] = useState(false);
   const [orderStatusFilter, setOrderStatusFilter] = useState<string>("");
+  const [orderErrors, setOrderErrors] = useState<Record<string, string>>({});
   const [isCheckoutModalOpen, setIsCheckoutModalOpen] = useState(false);
   const [checkoutFullName, setCheckoutFullName] = useState("");
   const [checkoutEmail, setCheckoutEmail] = useState("");
@@ -659,13 +660,15 @@ export default function App() {
         headers
       });
       if (res.ok) {
+        setOrderErrors(prev => ({ ...prev, [orderId]: "" }));
         await loadOrders();
       } else {
         const errData = await res.json();
-        alert(`Ошибка отмены: ${errData.message || res.statusText}`);
+        setOrderErrors(prev => ({ ...prev, [orderId]: errData.message || res.statusText }));
       }
     } catch (err) {
       console.error("Failed to cancel order:", err);
+      setOrderErrors(prev => ({ ...prev, [orderId]: "Сетевая ошибка при отмене заказа." }));
     }
   };
 
@@ -1298,13 +1301,20 @@ export default function App() {
                       </div>
 
                       {(order.status === "CREATED" || order.status === "PAID") && (
-                        <button
-                          type="button"
-                          onClick={() => handleCancelOrder(order.id)}
-                          className="px-3.5 py-1.5 rounded-xl border border-rose-500/20 bg-rose-500/10 text-rose-400 text-[10px] font-black uppercase hover:bg-rose-500 hover:text-slate-950 transition-all font-mono shadow-md"
-                        >
-                          ❌ Отменить заказ
-                        </button>
+                        <div className="flex flex-col items-end gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => handleCancelOrder(order.id)}
+                            className="px-3.5 py-1.5 rounded-xl border border-rose-500/20 bg-rose-500/10 text-rose-400 text-[10px] font-black uppercase hover:bg-rose-500 hover:text-slate-950 transition-all font-mono shadow-md cursor-pointer"
+                          >
+                            ❌ Отменить заказ
+                          </button>
+                          {orderErrors[order.id] && (
+                            <span className="text-[9px] font-mono font-bold text-rose-400 max-w-[200px] text-right">
+                              ⚠️ {orderErrors[order.id]}
+                            </span>
+                          )}
+                        </div>
                       )}
                     </div>
                   </div>

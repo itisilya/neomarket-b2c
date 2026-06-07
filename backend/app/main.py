@@ -14,7 +14,8 @@ from app.schemas import (
     SubscriptionRequest, SubscriptionResponse, SubscriptionsListResponse,
     CartItemAddRequest, CartItemUpdateRequest, CartItemResponse, CartResponse, CartMergeRequest,
     BannerResponse, BannerEventRequest, Collection, CollectionDetailResponse,
-    OrderItemRequest, OrderCreateRequest, OrderItemResponse, OrderResponse, PaginatedOrders
+    OrderItemRequest, OrderCreateRequest, OrderItemResponse, OrderResponse, PaginatedOrders,
+    OrderCancelRequest
 )
 from app.b2b_client import B2BClient
 
@@ -2213,6 +2214,7 @@ def get_order_detail(
 @app.post("/orders/{order_id}/cancel", response_model=OrderResponse)
 def cancel_order(
     order_id: UUID,
+    payload: Optional[OrderCancelRequest] = None,
     authorization: Optional[str] = Header(None),
     x_simulate_b2b_outage: Optional[str] = Header(None, alias="X-Simulate-B2B-Outage")
 ):
@@ -2244,6 +2246,8 @@ def cancel_order(
             }
         )
 
+    reason_str = payload.reason if (payload and payload.reason) else None
+
     # If B2B is unavailable, transition to CANCEL_PENDING
     if x_simulate_b2b_outage == "true" or b2b_client.simulate_outage:
         now_iso = datetime.datetime.utcnow().isoformat() + "Z"
@@ -2251,7 +2255,9 @@ def cancel_order(
         order["updated_at"] = now_iso
         if "status_history" not in order:
             order["status_history"] = []
-        order["status_history"].append({"status": "CANCEL_PENDING", "changed_at": now_iso, "reason": "B2B service unavailable"})
+        reason_msg = reason_str if reason_str else "B2B service unavailable"
+        order["status_history"].append({"status": "CANCEL_PENDING", "changed_at": now_iso, "reason": reason_msg})
+        order["cancel_reason"] = reason_str
         return order
 
     # Unreserve SKU in B2B (add stock back)
@@ -2276,5 +2282,7 @@ def cancel_order(
     order["updated_at"] = now_iso
     if "status_history" not in order:
         order["status_history"] = []
-    order["status_history"].append({"status": "CANCELLED", "changed_at": now_iso, "reason": "Order cancelled by client"})
+    reason_msg = reason_str if reason_str else "Order cancelled by client"
+    order["status_history"].append({"status": "CANCELLED", "changed_at": now_iso, "reason": reason_msg})
+    order["cancel_reason"] = reason_str
     return order
