@@ -87,8 +87,10 @@ export default function App() {
   // US-ORD-01 Checkout and Order states
   const [orders, setOrders] = useState<any[]>([]);
   const [ordersLoading, setOrdersLoading] = useState(false);
+  const [orderStatusFilter, setOrderStatusFilter] = useState<string>("");
   const [isCheckoutModalOpen, setIsCheckoutModalOpen] = useState(false);
-  const [deliveryAddress, setDeliveryAddress] = useState("г. Екатеринбург, ул. Мира 19, кв. 42");
+  const [checkoutFullName, setCheckoutFullName] = useState("");
+  const [checkoutEmail, setCheckoutEmail] = useState("");
   const [checkoutComment, setCheckoutComment] = useState("");
   const [checkoutError, setCheckoutError] = useState<string | null>(null);
   const [failedItems, setFailedItems] = useState<any[]>([]);
@@ -560,7 +562,7 @@ export default function App() {
     setIsCheckoutModalOpen(true);
   };
 
-  const loadOrders = async () => {
+  const loadOrders = async (status?: string) => {
     setOrdersLoading(true);
     try {
       const headers: Record<string, string> = {
@@ -569,7 +571,9 @@ export default function App() {
       if (simulateB2bOutage) {
         headers["X-Simulate-B2B-Outage"] = "true";
       }
-      const res = await fetch("/api/v1/orders", { headers });
+      const targetStatus = typeof status === "string" ? status : orderStatusFilter;
+      const url = targetStatus ? `/api/v1/orders?status=${targetStatus}` : "/api/v1/orders";
+      const res = await fetch(url, { headers });
       if (res.ok) {
         const data = await res.json();
         setOrders(data.items || []);
@@ -580,6 +584,12 @@ export default function App() {
       setOrdersLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (activeTab === "orders") {
+      loadOrders(orderStatusFilter);
+    }
+  }, [orderStatusFilter, activeTab]);
 
   const handleCheckoutSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -609,7 +619,7 @@ export default function App() {
         body: JSON.stringify({
           idempotency_key: idempotencyKey,
           items: reqItems,
-          delivery_address: deliveryAddress,
+          delivery_address: `ФИО: ${checkoutFullName}, Email: ${checkoutEmail}`,
           comment: checkoutComment
         })
       });
@@ -1170,6 +1180,33 @@ export default function App() {
               </div>
             </div>
 
+            {/* Status Filter Tabs */}
+            <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-900/60 border border-slate-800/80 p-3.5 rounded-2xl">
+              <div className="flex items-center gap-1.5 overflow-x-auto py-1">
+                {[
+                  { value: "", label: "Все статусы" },
+                  { value: "PAID", label: "Оплачены" },
+                  { value: "CANCEL_PENDING", label: "В процессе отмены" },
+                  { value: "CANCELLED", label: "Отменены" },
+                ].map((tab) => (
+                  <button
+                    key={tab.value}
+                    onClick={() => setOrderStatusFilter(tab.value)}
+                    className={`px-3 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-wider transition-all cursor-pointer ${
+                      orderStatusFilter === tab.value
+                        ? "bg-slate-800/90 text-amber-400 border border-slate-700/80 shadow-md shadow-black/20"
+                        : "text-slate-400 hover:text-white hover:bg-slate-850"
+                    }`}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+              <div className="text-[10px] font-black text-slate-500 font-mono tracking-wide uppercase">
+                Заказов: {orders.length} шт.
+              </div>
+            </div>
+
             {ordersLoading ? (
               <div className="flex flex-col items-center justify-center py-20">
                 <div className="h-8 w-8 animate-spin rounded-full border-2 border-amber-500 border-t-transparent" />
@@ -1250,7 +1287,7 @@ export default function App() {
                       <div>
                         {order.delivery_address && (
                           <p className="mt-1 text-[10px] text-slate-500 leading-normal flex items-start gap-1">
-                            <span>📍 Адрес получения:</span> <strong className="text-slate-400 font-bold">{order.delivery_address}</strong>
+                            <span>{order.delivery_address.includes("ФИО:") ? "🔑 Получатель:" : "📍 Адрес получения:"}</span> <strong className="text-slate-400 font-bold">{order.delivery_address}</strong>
                           </p>
                         )}
                         {order.comment && (
@@ -1484,17 +1521,30 @@ export default function App() {
 
             {/* Form */}
             <form onSubmit={handleCheckoutSubmit} className="space-y-4">
-              {/* Delivery Address */}
-              <div className="space-y-1.5">
-                <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider font-mono">Адрес доставки / Получатель:</label>
-                <input
-                  type="text"
-                  required
-                  value={deliveryAddress}
-                  onChange={(e) => setDeliveryAddress(e.target.value)}
-                  placeholder="ФИО, город, адрес доставки..."
-                  className="w-full text-xs font-semibold rounded-xl border border-slate-800 bg-slate-950 px-3.5 py-2.5 text-slate-200 focus:outline-none focus:ring-1 focus:ring-cyan-400"
-                />
+              {/* Full Name & Email */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="space-y-1.5">
+                  <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider font-mono">ФИО Получателя:</label>
+                  <input
+                    type="text"
+                    required
+                    value={checkoutFullName}
+                    onChange={(e) => setCheckoutFullName(e.target.value)}
+                    placeholder="Иванов Иван Иванович"
+                    className="w-full text-xs font-semibold rounded-xl border border-slate-800 bg-slate-950 px-3.5 py-2.5 text-slate-200 focus:outline-none focus:ring-1 focus:ring-cyan-400"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider font-mono">Адрес эл. почты:</label>
+                  <input
+                    type="email"
+                    required
+                    value={checkoutEmail}
+                    onChange={(e) => setCheckoutEmail(e.target.value)}
+                    placeholder="username@email.com"
+                    className="w-full text-xs font-semibold rounded-xl border border-slate-800 bg-slate-950 px-3.5 py-2.5 text-slate-200 focus:outline-none focus:ring-1 focus:ring-cyan-400"
+                  />
+                </div>
               </div>
 
               {/* Comment */}
