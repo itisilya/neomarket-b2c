@@ -315,3 +315,7 @@ class PaginatedOrders(BaseModel):
     total_count: int
     limit: int
     offset: int
+
+
+class OrderCancelRequest(BaseModel):
+    reason: Optional[str] = None

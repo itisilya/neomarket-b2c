@@ -1255,3 +1255,150 @@ def test_other_user_order_returns_404_not_403():
     )
     assert response_b.status_code == 404
     assert response_b.json()["code"] == "ORDER_NOT_FOUND"
+
+
+def test_cancel_paid_order_transitions_to_cancelled():
+    """
+    happy: cancel_paid_order_transitions_to_cancelled
+    - Отмена оплаченного заказа -> переход в CANCELLED
+    """
+    user_id = "a1111111-e29b-41d4-a716-446655449905"
+    token = create_mock_jwt(user_id)
+    sku_id = "00000000-0000-0000-0000-000000000001"
+    idempotency_key = "50000000-1111-2222-3333-444444444441"
+    
+    # Place order
+    response = client.post(
+        "/api/v1/orders",
+        json={
+            "idempotency_key": idempotency_key,
+            "items": [{"sku_id": sku_id, "quantity": 1}],
+            "address_id": "e2020000-e29b-41d4-a716-446655440001",
+            "payment_method_id": "e3030000-e29b-41d4-a716-446655440001"
+        },
+        headers={"Authorization": token, "Idempotency-Key": idempotency_key}
+    )
+    assert response.status_code == 201
+    order_id = response.json()["id"]
+    
+    # Cancel order
+    cancel_response = client.post(
+        f"/api/v1/orders/{order_id}/cancel",
+        headers={"Authorization": token}
+    )
+    assert cancel_response.status_code == 200
+    data = cancel_response.json()
+    assert data["status"] == "CANCELLED"
+    assert any(h["status"] == "CANCELLED" for h in data["status_history"])
+
+
+def test_unreserve_failure_transitions_to_cancel_pending():
+    """
+    unhappy: unreserve_failure_transitions_to_cancel_pending
+    - B2B недоступен -> статус CANCEL_PENDING
+    """
+    user_id = "a1111111-e29b-41d4-a716-446655449906"
+    token = create_mock_jwt(user_id)
+    sku_id = "00000000-0000-0000-0000-000000000001"
+    idempotency_key = "60000000-1111-2222-3333-444444444441"
+    
+    # Place order
+    response = client.post(
+        "/api/v1/orders",
+        json={
+            "idempotency_key": idempotency_key,
+            "items": [{"sku_id": sku_id, "quantity": 1}],
+            "address_id": "e2020000-e29b-41d4-a716-446655440001",
+            "payment_method_id": "e3030000-e29b-41d4-a716-446655440001"
+        },
+        headers={"Authorization": token, "Idempotency-Key": idempotency_key}
+    )
+    assert response.status_code == 201
+    order_id = response.json()["id"]
+    
+    # Cancel order with simulated B2B outage
+    cancel_response = client.post(
+        f"/api/v1/orders/{order_id}/cancel",
+        headers={"Authorization": token, "X-Simulate-B2B-Outage": "true"}
+    )
+    assert cancel_response.status_code == 200
+    data = cancel_response.json()
+    assert data["status"] == "CANCEL_PENDING"
+    assert any(h["status"] == "CANCEL_PENDING" for h in data["status_history"])
+
+
+def test_cancel_assembling_order_returns_409():
+    """
+    unhappy: cancel_assembling_order_returns_409
+    - заказ в ASSEMBLING -> 409 CANCEL_NOT_ALLOWED с текущим статусом
+    """
+    from app.main import ORDERS_DB
+    from uuid import UUID
+    user_id = "a1111111-e29b-41d4-a716-446655449907"
+    token = create_mock_jwt(user_id)
+    sku_id = "00000000-0000-0000-0000-000000000001"
+    idempotency_key = "70000000-1111-2222-3333-444444444441"
+    
+    # Place order
+    response = client.post(
+        "/api/v1/orders",
+        json={
+            "idempotency_key": idempotency_key,
+            "items": [{"sku_id": sku_id, "quantity": 1}],
+            "address_id": "e2020000-e29b-41d4-a716-446655440001",
+            "payment_method_id": "e3030000-e29b-41d4-a716-446655440001"
+        },
+        headers={"Authorization": token, "Idempotency-Key": idempotency_key}
+    )
+    assert response.status_code == 201
+    order_id_raw = response.json()["id"]
+    order_id = UUID(order_id_raw)
+    
+    # Change status to ASSEMBLING
+    assert order_id in ORDERS_DB
+    ORDERS_DB[order_id]["status"] = "ASSEMBLING"
+    
+    # Cancel order -> 409
+    cancel_response = client.post(
+        f"/api/v1/orders/{order_id}/cancel",
+        headers={"Authorization": token}
+    )
+    assert cancel_response.status_code == 409
+    data = cancel_response.json()
+    assert data["code"] == "CANCEL_NOT_ALLOWED"
+    assert data["current_status"] == "ASSEMBLING"
+
+
+def test_other_user_order_returns_404():
+    """
+    unhappy: other_user_order_returns_404
+    - IDOR: попытка отменить чужой заказ -> 404
+    """
+    user_a = "a1111111-e29b-41d4-a716-446655449908"
+    user_b = "b1111111-e29b-41d4-a716-446655449909"
+    token_a = create_mock_jwt(user_a)
+    token_b = create_mock_jwt(user_b)
+    sku_id = "00000000-0000-0000-0000-000000000001"
+    idempotency_key = "80000000-1111-2222-3333-444444444441"
+    
+    # Place order as user A
+    response = client.post(
+        "/api/v1/orders",
+        json={
+            "idempotency_key": idempotency_key,
+            "items": [{"sku_id": sku_id, "quantity": 1}],
+            "address_id": "e2020000-e29b-41d4-a716-446655440001",
+            "payment_method_id": "e3030000-e29b-41d4-a716-446655440001"
+        },
+        headers={"Authorization": token_a, "Idempotency-Key": idempotency_key}
+    )
+    assert response.status_code == 201
+    order_id = response.json()["id"]
+    
+    # User B tries to cancel User A's order -> 404
+    cancel_response = client.post(
+        f"/api/v1/orders/{order_id}/cancel",
+        headers={"Authorization": token_b}
+    )
+    assert cancel_response.status_code == 404
+    assert cancel_response.json()["code"] == "ORDER_NOT_FOUND"
