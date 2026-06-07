@@ -13,7 +13,7 @@ from app.schemas import (
     FavoriteResponse, FavoritesResponse,
     SubscriptionRequest, SubscriptionResponse, SubscriptionsListResponse,
     CartItemAddRequest, CartItemUpdateRequest, CartItemResponse, CartResponse, CartMergeRequest,
-    BannerResponse, BannerEventRequest
+    BannerResponse, BannerEventRequest, Collection, CollectionDetailResponse
 )
 from app.b2b_client import B2BClient
 
@@ -855,6 +855,31 @@ FAVORITES_DB: Dict[UUID, List[Dict[str, Any]]] = {}
 # Simulated B2C database for subscriptions
 # Key: user_id (UUID), Value: List of Dict containing id (UUID), product_id (UUID), notify_on (List[str]), and created_at (str)
 SUBSCRIPTIONS_DB: Dict[UUID, List[Dict[str, Any]]] = {}
+
+# Simulated B2C database for collections
+# Key: collection_id (UUID), Value: Dict of metadata and referenced product IDs
+COLLECTIONS_DB: Dict[UUID, Dict[str, Any]] = {
+    UUID("d70e8400-e29b-41d4-a716-446655440001"): {
+        "id": UUID("d70e8400-e29b-41d4-a716-446655440001"),
+        "name": "Хиты продаж",
+        "description": "Самые популярные каналы с высокой доходностью",
+        "product_ids": [
+            UUID("770e8400-e29b-41d4-a716-446655440001"),
+            UUID("770e8400-e29b-41d4-a716-446655440002")
+        ]
+    },
+    UUID("d70e8400-e29b-41d4-a716-446655440002"): {
+        "id": UUID("d70e8400-e29b-41d4-a716-446655440002"),
+        "name": "Новинки сезона",
+        "description": "Свежие каналы, недавно добавленные на биржу",
+        "product_ids": [
+            UUID("770e8400-e29b-41d4-a716-446655440003"),
+            UUID("770e8400-e29b-41d4-a716-446655440099"),  # DRAFT in B2B
+            UUID("770e8400-e29b-41d4-a716-446655440098")   # DELETED in B2B
+        ]
+    }
+}
+
 
 def decode_jwt(token: str) -> dict:
     import base64
@@ -1819,3 +1844,100 @@ def post_banner_event(payload: BannerEventRequest):
     }
     BANNER_EVENTS_LOG.append(event_log)
     return {"status": "ok", "message": "Event logged successfully"}
+
+
+@app.get("/api/v1/catalog/collections", response_model=List[Collection])
+@app.get("/catalog/collections", response_model=List[Collection])
+def get_collections():
+    # Return all collections in database with products as an empty list (metadata without products)
+    result = []
+    for cid, col in COLLECTIONS_DB.items():
+        result.append(Collection(
+            id=col["id"],
+            name=col["name"],
+            description=col.get("description"),
+            products=[]
+        ))
+    return result
+
+
+@app.get("/api/v1/catalog/collections/{collection_id}", response_model=CollectionDetailResponse)
+@app.get("/catalog/collections/{collection_id}", response_model=CollectionDetailResponse)
+def get_collection_detail(
+    collection_id: UUID,
+    x_simulate_b2b_outage: Optional[str] = Header(None, alias="X-Simulate-B2B-Outage")
+):
+    # Simulate B2B outage if header is sent
+    if x_simulate_b2b_outage == "true" or b2b_client.simulate_outage:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "B2B_UNAVAILABLE", "message": "B2B Service Unavailable"}
+        )
+
+    col = COLLECTIONS_DB.get(collection_id)
+    if not col:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "NOT_FOUND", "message": "Collection not found"}
+        )
+
+    try:
+        b2b_products = b2b_client._products
+        b2b_categories = b2b_client._categories
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "B2B_UNAVAILABLE", "message": str(e)}
+        )
+
+    items = []
+    unavailable_ids = []
+
+    product_ids_set = col["product_ids"]
+
+    for pid in product_ids_set:
+        # Find product in B2B
+        p = next((prod for prod in b2b_products if prod["id"] == pid), None)
+        
+        # Determine availability: exists AND is visible (status MODERATED, not deleted, active_quantity > 0)
+        is_available = False
+        if p:
+            if p.get("status") == "MODERATED" and not p.get("deleted", False) and p.get("active_quantity", 0) > 0:
+                is_available = True
+
+        if is_available:
+            cat_ref = next((c for c in b2b_categories if c["id"] == p["category_id"]), None)
+            cat_path = get_breadcrumbs_for_category(b2b_categories, cat_ref["id"]) if cat_ref else []
+
+            items.append({
+                "id": p["id"],
+                "name": p["title"],
+                "slug": p["slug"],
+                "category": {
+                    "id": cat_ref["id"],
+                    "name": cat_ref["name"],
+                    "level": len(cat_path) - 1,
+                    "path": [t["name"] for t in cat_path]
+                } if cat_ref else None,
+                "min_price": p["price"],
+                "old_price": p.get("old_price"),
+                "has_stock": p.get("active_quantity", 0) > 0,
+                "rating": p.get("rating"),
+                "reviews_count": p.get("reviews_count", 0),
+                "subscribers": p["subscribers"],
+                "monthly_income": p["monthly_income"],
+                "er": p["er"],
+                "verified": p["verified"],
+                "images": p.get("images", []),
+                "seller": p.get("seller")
+            })
+        else:
+            unavailable_ids.append(pid)
+
+    return {
+        "id": col["id"],
+        "name": col["name"],
+        "description": col.get("description"),
+        "items": items,
+        "unavailable_ids": unavailable_ids
+    }

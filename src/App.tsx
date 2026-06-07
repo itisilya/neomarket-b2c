@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { CatalogProductCard, CatalogProductDetail, CategoryRef, CatalogSku, FacetsResponse, BreadcrumbItem, FavoriteItem, FavoritesResponse, CartResponse, CartItemResponse } from "./types";
+import { CatalogProductCard, CatalogProductDetail, CategoryRef, CatalogSku, FacetsResponse, BreadcrumbItem, FavoriteItem, FavoritesResponse, CartResponse, CartItemResponse, Collection, CollectionDetailResponse } from "./types";
 import { SidebarFilters } from "./components/SidebarFilters";
 import { ChannelCard } from "./components/ChannelCard";
 import { ChannelDetailModal } from "./components/ChannelDetailModal";
@@ -66,6 +66,11 @@ export default function App() {
   // US-CART-04: Banners & CTR Analytics state
   const [banners, setBanners] = useState<any[]>([]);
   const [activeBannerIndex, setActiveBannerIndex] = useState(0);
+  
+  // US-CART-05: Collections & Products state
+  const [collections, setCollections] = useState<Collection[]>([]);
+  const [collectionsDetail, setCollectionsDetail] = useState<Record<string, CollectionDetailResponse>>({});
+  const [collectionsLoading, setCollectionsLoading] = useState(false);
   
   // Real B2C Favorites Database Integration
   const MOCK_JWT = "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhMTExMTExMS1lMjliLTQxZDQtYTcxNi00NDY2NTU0NDAwMDEifQ.mock-signature";
@@ -203,6 +208,48 @@ export default function App() {
     }
   };
 
+  const [isB2BOutage, setIsB2BOutage] = useState(false);
+
+  const loadCollections = async () => {
+    setCollectionsLoading(true);
+    setIsB2BOutage(false);
+    try {
+      const res = await fetch("/api/v1/catalog/collections");
+      if (res.ok) {
+        const list: Collection[] = await res.json();
+        setCollections(list);
+        
+        // Batch fetch their details
+        const details: Record<string, CollectionDetailResponse> = {};
+        let outageDetected = false;
+        for (const col of list) {
+          try {
+            const detailRes = await fetch(`/api/v1/catalog/collections/${col.id}`);
+            if (detailRes.ok) {
+              const detail: CollectionDetailResponse = await detailRes.json();
+              details[col.id] = detail;
+            } else {
+              if (detailRes.status === 502) {
+                outageDetected = true;
+              }
+              console.warn(`Failed to fetch detail for collection ${col.id}: status ${detailRes.status}`);
+            }
+          } catch (e) {
+            console.error(`Error requesting collection detail ${col.id}:`, e);
+          }
+        }
+        setCollectionsDetail(details);
+        if (outageDetected) {
+          setIsB2BOutage(true);
+        }
+      }
+    } catch (err) {
+      console.error("Failed to load catalog collections:", err);
+    } finally {
+      setCollectionsLoading(false);
+    }
+  };
+
   useEffect(() => {
     let sId = localStorage.getItem("b2c_session_id");
     if (!sId) {
@@ -215,6 +262,7 @@ export default function App() {
     loadSubscriptions();
     loadCart(authMode, sId);
     loadBanners();
+    loadCollections();
   }, [authMode]);
 
   const handleToggleFavorite = async (productId: string, e?: React.MouseEvent) => {
@@ -502,6 +550,7 @@ export default function App() {
   };
 
   const cartTotal = cart.total_amount;
+  const isDefaultHome = !selectedCategoryId && !searchQuery && !priceMin && !priceMax && !verifiedOnly;
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 antialiased font-sans">
@@ -728,6 +777,78 @@ export default function App() {
                       <p className="mt-2 text-xs text-slate-400 leading-relaxed">
                         Все выставленные Telegram-каналы прошли полную модерацию и аудит вовлеченности (ER) нашими кураторами. Простая сделка "под ключ" через Безопасный Гарант.
                       </p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Curated Collections Section */}
+                {isDefaultHome && isB2BOutage && (
+                  <div className="bg-rose-950/20 border border-rose-900/50 p-4 rounded-xl text-left">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-rose-400 block">Ошибка B2B API</span>
+                    <span className="text-xs text-slate-400 mt-1 block leading-normal">
+                      Тематические подборки недоступны, так как партнерский B2B-роутер временно отключен. Вы можете воспользоваться общим списком товаров ниже.
+                    </span>
+                  </div>
+                )}
+
+                {isDefaultHome && collections.length > 0 && !isB2BOutage && (
+                  <div className="space-y-6 pt-2">
+                    <div className="flex items-center gap-2">
+                      <Flame className="h-5 w-5 text-cyan-400 stroke-2 animate-pulse" />
+                      <h2 className="text-sm font-black text-white uppercase tracking-wider">Тематические подборки</h2>
+                    </div>
+
+                    <div className="space-y-6">
+                      {collections.map((col) => {
+                        const detail = collectionsDetail[col.id];
+                        
+                        // If detail is still loading/missing, show elegant skeletons
+                        if (!detail) {
+                          return (
+                            <div key={col.id} className="space-y-4 rounded-2xl border border-slate-800 bg-slate-900/10 p-6 animate-pulse">
+                              <div className="h-6 w-48 bg-slate-800 rounded mb-2"></div>
+                              <div className="h-4 w-72 bg-slate-800 rounded"></div>
+                              <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3 mt-4">
+                                <div className="h-48 bg-slate-800 rounded-xl" />
+                                <div className="h-48 bg-slate-800 rounded-xl" />
+                                <div className="h-48 bg-slate-800 rounded-xl" />
+                              </div>
+                            </div>
+                          );
+                        }
+
+                        if (!detail.items || detail.items.length === 0) return null;
+
+                        return (
+                          <div key={col.id} className="space-y-4 rounded-2xl border border-slate-850 bg-slate-900/15 p-6 backdrop-blur-sm shadow-xl transition-all hover:border-slate-800">
+                            <div className="flex flex-col md:flex-row md:items-center justify-between border-b border-slate-800 pb-3 gap-2">
+                              <div>
+                                <div className="flex items-center gap-2">
+                                  <h3 className="text-sm font-black text-white uppercase tracking-wider">{col.name}</h3>
+                                  <span className="text-[10px] uppercase font-mono font-bold px-2 py-0.5 rounded bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">
+                                    {detail.items.length} активов
+                                  </span>
+                                </div>
+                                {col.description && (
+                                  <p className="text-xs text-slate-400 mt-1">{col.description}</p>
+                                )}
+                              </div>
+                            </div>
+                            
+                            <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3 pt-2">
+                              {detail.items.map((p) => (
+                                <ChannelCard
+                                  key={p.id}
+                                  channel={p}
+                                  onClick={() => handleSelectProduct(p.id)}
+                                  isFavorite={favorites.includes(p.id)}
+                                  onToggleFavorite={handleToggleFavorite}
+                                />
+                              ))}
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
                 )}

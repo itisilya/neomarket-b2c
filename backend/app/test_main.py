@@ -901,3 +901,70 @@ def test_click_on_valid_banner_returns_201():
         assert len(BANNER_EVENTS_LOG) == init_len + 1
         assert BANNER_EVENTS_LOG[-1]["banner_id"] == BANNERS_DB[0]["id"]
         assert BANNER_EVENTS_LOG[-1]["event_type"] == "CLICK"
+
+
+def test_collections_list_returns_metadata_without_products():
+    """
+    happy: collections_list_returns_metadata_without_products
+    Проверяет, что возвращается список подборок без товаров внутри (поле products пустое).
+    """
+    response = client.get("/api/v1/catalog/collections")
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data) >= 2
+    for col in data:
+        assert "id" in col
+        assert "name" in col
+        assert "products" in col
+        assert col["products"] == []  # metadata without products
+
+
+def test_collection_products_enriched_from_b2b():
+    """
+    happy: collection_products_enriched_from_b2b
+    Проверяет, что конкретная подборка возвращает товары, обогащенные из B2B.
+    """
+    col_id = "d70e8400-e29b-41d4-a716-446655440001"
+    response = client.get(f"/api/v1/catalog/collections/{col_id}")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["id"] == col_id
+    assert data["name"] == "Хиты продаж"
+    assert "items" in data
+    assert "unavailable_ids" in data
+    
+    assert len(data["items"]) == 2
+    for item in data["items"]:
+        assert "id" in item
+        assert "name" in item
+        assert "min_price" in item
+        assert "subscribers" in item
+
+
+def test_unavailable_products_in_unavailable_ids():
+    """
+    unhappy: unavailable_products_in_unavailable_ids
+    Проверяет, что удалённые/заблокированные/немодерированные товары в B2B попадают в unavailable_ids, а не в items.
+    """
+    col_id = "d70e8400-e29b-41d4-a716-446655440002"
+    response = client.get(f"/api/v1/catalog/collections/{col_id}")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["id"] == col_id
+    assert len(data["items"]) == 1
+    assert data["items"][0]["id"] == "770e8400-e29b-41d4-a716-446655440003"
+    
+    assert len(data["unavailable_ids"]) == 2
+    assert "770e8400-e29b-41d4-a716-446655440099" in data["unavailable_ids"]
+    assert "770e8400-e29b-41d4-a716-446655440098" in data["unavailable_ids"]
+
+
+def test_unknown_collection_returns_404():
+    """
+    unhappy: unknown_collection_returns_404
+    Проверяет, что несуществующая подборка возвращает 404 Not Found.
+    """
+    unknown_id = "00000000-0000-0000-0000-000000000000"
+    response = client.get(f"/api/v1/catalog/collections/{unknown_id}")
+    assert response.status_code == 404
+    assert response.json()["code"] == "NOT_FOUND"

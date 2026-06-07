@@ -244,3 +244,20 @@ class BannerEventRequest(BaseModel):
     banner_id: UUID
     event_type: str
 
+
+class Collection(BaseModel):
+    id: UUID
+    name: str
+    description: Optional[str] = None
+    products: List[CatalogProductCard] = []
+
+
+class CollectionDetailResponse(BaseModel):
+    id: UUID
+    name: str
+    description: Optional[str] = None
+    items: List[CatalogProductCard]
+    unavailable_ids: List[UUID]
+
+
+
