@@ -131,5 +131,17 @@ export interface Banner {
   end_at: string | null;
 }
 
+export interface Collection {
+  id: string;
+  name: string;
+  description?: string;
+  products: CatalogProductCard[];
+}
 
-
+export interface CollectionDetailResponse {
+  id: string;
+  name: string;
+  description?: string;
+  items: CatalogProductCard[];
+  unavailable_ids: string[];
+}
