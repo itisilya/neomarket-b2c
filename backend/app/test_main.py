@@ -968,3 +968,132 @@ def test_unknown_collection_returns_404():
     response = client.get(f"/api/v1/catalog/collections/{unknown_id}")
     assert response.status_code == 404
     assert response.json()["code"] == "NOT_FOUND"
+
+
+def test_checkout_creates_paid_order_with_fixed_prices():
+    """
+    happy path: checkout_creates_paid_order_with_fixed_prices
+    - unit_price зафиксирован в OrderItem;
+    - Статус заказа PAID.
+    """
+    user_id = "a1111111-e29b-41d4-a716-446655440001"
+    token = create_mock_jwt(user_id)
+    idempotency_key = "11111111-2222-3333-4444-555555555555"
+    
+    sku_id = "00000000-0000-0000-0000-000000000001" # Crypto Whale SKU, price is 15000000
+    
+    response = client.post(
+        "/api/v1/orders",
+        json={
+            "idempotency_key": idempotency_key,
+            "items": [{"sku_id": sku_id, "quantity": 1}],
+            "address_id": "e2020000-e29b-41d4-a716-446655440001",
+            "payment_method_id": "e3030000-e29b-41d4-a716-446655440001"
+        },
+        headers={"Authorization": token, "Idempotency-Key": idempotency_key}
+    )
+    
+    assert response.status_code == 201
+    data = response.json()
+    assert data["status"] == "PAID"
+    assert len(data["items"]) == 1
+    item = data["items"][0]
+    assert item["sku_id"] == sku_id
+    assert item["unit_price"] == 15000000
+    assert item["line_total"] == 15000000
+
+
+def test_partial_reserve_failure_returns_409():
+    """
+    unhappy: partial_reserve_failure_returns_409
+    - хотя бы один SKU не зарезервирован -> 409 RESERVE_FAILED с failed_items
+    """
+    user_id = "a1111111-e29b-41d4-a716-446655440001"
+    token = create_mock_jwt(user_id)
+    idempotency_key = "22222222-3333-4444-5555-666666666666"
+    
+    # Requesting excessive quantity to trigger INSUFFICIENT_STOCK
+    sku_id = "00000000-0000-0000-0000-000000000001" # has limited stock in B2B
+    
+    response = client.post(
+        "/api/v1/orders",
+        json={
+            "idempotency_key": idempotency_key,
+            "items": [{"sku_id": sku_id, "quantity": 99999}],
+            "address_id": "e2020000-e29b-41d4-a716-446655440001",
+            "payment_method_id": "e3030000-e29b-41d4-a716-446655440001"
+        },
+        headers={"Authorization": token, "Idempotency-Key": idempotency_key}
+    )
+    
+    assert response.status_code == 409
+    data = response.json()
+    assert data["code"] == "RESERVE_FAILED"
+    assert "failed_items" in data
+    assert len(data["failed_items"]) > 0
+
+
+def test_idempotency_returns_existing_order():
+    """
+    unhappy: idempotency_returns_existing_order
+    - повторный POST с тем же idempotency_key возвращает существующий заказ;
+    """
+    user_id = "a1111111-e29b-41d4-a716-446655440001"
+    token = create_mock_jwt(user_id)
+    idempotency_key = "33333333-4444-5555-6666-777777777777"
+    
+    sku_id = "00000000-0000-0000-0000-000000000001"
+    
+    payload = {
+        "idempotency_key": idempotency_key,
+        "items": [{"sku_id": sku_id, "quantity": 1}],
+        "address_id": "e2020000-e29b-41d4-a716-446655440001",
+        "payment_method_id": "e3030000-e29b-41d4-a716-446655440001"
+    }
+    
+    # First request
+    response1 = client.post(
+        "/api/v1/orders",
+        json=payload,
+        headers={"Authorization": token, "Idempotency-Key": idempotency_key}
+    )
+    assert response1.status_code == 201
+    order1 = response1.json()
+    
+    # Second request
+    response2 = client.post(
+        "/api/v1/orders",
+        json=payload,
+        headers={"Authorization": token, "Idempotency-Key": idempotency_key}
+    )
+    assert response2.status_code in [200, 201]
+    order2 = response2.json()
+    assert order1["id"] == order2["id"]
+
+
+def test_b2b_unavailable_returns_503():
+    """
+    unhappy: b2b_unavailable_returns_503
+    - B2B недоступен -> 503
+    """
+    user_id = "a1111111-e29b-41d4-a716-446655440001"
+    token = create_mock_jwt(user_id)
+    idempotency_key = "44444444-5555-6666-7777-888888888888"
+    
+    sku_id = "00000000-0000-0000-0000-000000000001"
+    
+    response = client.post(
+        "/api/v1/orders",
+        json={
+            "idempotency_key": idempotency_key,
+            "items": [{"sku_id": sku_id, "quantity": 1}],
+            "address_id": "e2020000-e29b-41d4-a716-446655440001",
+            "payment_method_id": "e3030000-e29b-41d4-a716-446655440001"
+        },
+        headers={"Authorization": token, "Idempotency-Key": idempotency_key, "X-Simulate-B2B-Outage": "true"}
+    )
+    
+    assert response.status_code == 503
+    data = response.json()
+    assert data["code"] == "B2B_UNAVAILABLE"
+    

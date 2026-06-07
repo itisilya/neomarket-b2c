@@ -145,3 +145,38 @@ export interface CollectionDetailResponse {
   items: CatalogProductCard[];
   unavailable_ids: string[];
 }
+
+
+export interface OrderItemResponse {
+  id: string;
+  sku_id: string;
+  product_id: string;
+  name: string;
+  sku_code: string;
+  quantity: number;
+  unit_price: number;
+  line_total: number;
+  image_url: string | null;
+}
+
+export interface OrderResponse {
+  id: string;
+  number: string;
+  buyer_id: string;
+  status: "CREATED" | "PAID" | "DELIVERED" | "CANCEL_PENDING" | "CANCELLED";
+  items: OrderItemResponse[];
+  subtotal: number;
+  total: number;
+  comment?: string | null;
+  delivery_address?: string | null;
+  created_at: string;
+  updated_at: string;
+  paid_at?: string | null;
+}
+
+export interface PaginatedOrders {
+  items: OrderResponse[];
+  total_count: number;
+  limit: number;
+  offset: number;
+}
