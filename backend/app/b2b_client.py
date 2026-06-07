@@ -45,7 +45,7 @@ class B2BClient:
                 "in_stock": True,
                 "status": "MODERATED",
                 "deleted": False,
-                "active_quantity": 1,
+                "active_quantity": 100,
                 "seller": {"id": "s1111111-e29b-41d4-a716-446655440001", "display_name": "Григорий Криптатов"},
                 "images": [
                     {"id": "img1", "url": "https://images.unsplash.com/photo-1621761191319-c6fb62004040?w=600&auto=format&fit=crop&q=80", "ordering": 0, "is_main": True}
@@ -55,7 +55,7 @@ class B2BClient:
                     {"name": "Язык аудитории", "value": "Русский"}
                 ],
                 "skus": [
-                    {"id": UUID("00000000-0000-0000-0000-000000000001"), "name": "Полная передача прав (Базовый)", "sku_code": "TG-WHALE-BASE", "price": 15000000, "available_quantity": 1, "images": []}
+                    {"id": UUID("00000000-0000-0000-0000-000000000001"), "name": "Полная передача прав (Базовый)", "sku_code": "TG-WHALE-BASE", "price": 15000000, "available_quantity": 100, "images": []}
                 ]
             },
             {

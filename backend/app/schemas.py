@@ -260,4 +260,58 @@ class CollectionDetailResponse(BaseModel):
     unavailable_ids: List[UUID]
 
 
+class OrderItemRequest(BaseModel):
+    sku_id: UUID
+    quantity: int
 
+
+class OrderCreateRequest(BaseModel):
+    address_id: Optional[UUID] = None
+    payment_method_id: Optional[UUID] = None
+    comment: Optional[str] = None
+    idempotency_key: Optional[UUID] = None
+    items: Optional[List[OrderItemRequest]] = None
+    delivery_address: Optional[str] = None
+
+
+class OrderItemResponse(BaseModel):
+    id: UUID
+    sku_id: UUID
+    product_id: UUID
+    product_title: Optional[str] = None
+    sku_name: Optional[str] = None
+    name: str
+    sku_code: Optional[str] = None
+    quantity: int
+    unit_price: int
+    line_total: int
+    image_url: Optional[str] = None
+
+
+class OrderResponse(BaseModel):
+    id: UUID
+    number: Optional[str] = None
+    buyer_id: Optional[UUID] = None
+    user_id: Optional[UUID] = None
+    status: str
+    status_history: List[Dict[str, Any]] = []
+    items: List[OrderItemResponse] = []
+    items_count: Optional[int] = None
+    subtotal: int
+    total: int
+    delivery_cost: int = 0
+    delivery_address: Optional[str] = None
+    address: Optional[Dict[str, Any]] = None
+    comment: Optional[str] = None
+    cancel_reason: Optional[str] = None
+    created_at: str
+    updated_at: str
+    paid_at: Optional[str] = None
+    delivered_at: Optional[str] = None
+
+
+class PaginatedOrders(BaseModel):
+    items: List[OrderResponse]
+    total_count: int
+    limit: int
+    offset: int

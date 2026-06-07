@@ -129,8 +129,8 @@ export const ChannelCard: React.FC<ChannelCardProps> = ({
             <span className="flex items-center gap-1 text-[9px] uppercase tracking-wider text-slate-400 font-bold">
               <DollarSign className="h-3 w-3 text-emerald-400" /> Доход/мес
             </span>
-            <span className="mt-1 font-mono text-xs font-extrabold text-white">
-              {rubIncome.toLocaleString("ru-RU")} ₽
+            <span className="mt-1 font-mono text-xs font-extrabold text-white whitespace-nowrap">
+              {rubIncome.toLocaleString("ru-RU")}&nbsp;₽
             </span>
           </div>
         </div>
@@ -141,12 +141,12 @@ export const ChannelCard: React.FC<ChannelCardProps> = ({
         <div>
           <span className="block text-[10px] text-slate-400 uppercase tracking-widest font-semibold">Цена</span>
           {oldRubPrice && (
-            <span className="text-xs text-slate-500 line-through mr-1.5 font-mono">
-              {oldRubPrice.toLocaleString("ru-RU")} ₽
+            <span className="text-xs text-slate-500 line-through mr-1.5 font-mono whitespace-nowrap">
+              {oldRubPrice.toLocaleString("ru-RU")}&nbsp;₽
             </span>
           )}
-          <span className="font-mono text-base font-extrabold text-cyan-400 neon-text">
-            {rubPrice.toLocaleString("ru-RU")}{" "}
+          <span className="font-mono text-base font-extrabold text-cyan-400 neon-text whitespace-nowrap inline-flex items-baseline">
+            {rubPrice.toLocaleString("ru-RU")}&nbsp;
             <span className="text-[11px] font-normal text-slate-400 font-mono">₽</span>
           </span>
         </div>

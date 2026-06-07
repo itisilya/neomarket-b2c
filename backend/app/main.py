@@ -13,7 +13,8 @@ from app.schemas import (
     FavoriteResponse, FavoritesResponse,
     SubscriptionRequest, SubscriptionResponse, SubscriptionsListResponse,
     CartItemAddRequest, CartItemUpdateRequest, CartItemResponse, CartResponse, CartMergeRequest,
-    BannerResponse, BannerEventRequest, Collection, CollectionDetailResponse
+    BannerResponse, BannerEventRequest, Collection, CollectionDetailResponse,
+    OrderItemRequest, OrderCreateRequest, OrderItemResponse, OrderResponse, PaginatedOrders
 )
 from app.b2b_client import B2BClient
 
@@ -879,6 +880,10 @@ COLLECTIONS_DB: Dict[UUID, Dict[str, Any]] = {
         ]
     }
 }
+
+# Simulated B2C database for orders
+# Key: order_id (UUID), Value: Dict of order details
+ORDERS_DB: Dict[UUID, Dict[str, Any]] = {}
 
 
 def decode_jwt(token: str) -> dict:
@@ -1941,3 +1946,335 @@ def get_collection_detail(
         "items": items,
         "unavailable_ids": unavailable_ids
     }
+
+
+# --- US-ORD-01: Order management (checkout) ---
+
+@app.post("/api/v1/orders", response_model=OrderResponse, status_code=status.HTTP_201_CREATED)
+@app.post("/orders", response_model=OrderResponse, status_code=status.HTTP_201_CREATED)
+def create_order(
+    payload: OrderCreateRequest,
+    authorization: Optional[str] = Header(None),
+    idempotency_key_header: Optional[str] = Header(None, alias="Idempotency-Key"),
+    x_simulate_b2b_outage: Optional[str] = Header(None, alias="X-Simulate-B2B-Outage")
+):
+    import uuid
+    import datetime
+
+    # 1. Authorization
+    user_id = get_user_id_from_auth(authorization)
+
+    # 2. Extract idempotency key
+    idempotency_key = None
+    if idempotency_key_header:
+        try:
+            idempotency_key = UUID(idempotency_key_header)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "INVALID_REQUEST", "message": "Idempotency-Key header is not a valid UUID"}
+            )
+    elif payload.idempotency_key:
+        idempotency_key = payload.idempotency_key
+
+    if not idempotency_key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "INVALID_REQUEST", "message": "Idempotency-Key is required"}
+        )
+
+    # 3. Check existing order
+    for o in ORDERS_DB.values():
+        if o.get("idempotency_key") == idempotency_key:
+            return o
+
+    # 4. Resolve items
+    items = payload.items
+    if not items:
+        # Fallback to fetching from Cart
+        cart_id_str = str(user_id)
+        cart_items_dict = CART_DB.get(cart_id_str, {})
+        items = []
+        for sku_id_str, qty in cart_items_dict.items():
+            items.append(OrderItemRequest(sku_id=UUID(sku_id_str), quantity=qty))
+
+    if not items:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "INVALID_REQUEST", "message": "Список items не может быть пустым"}
+        )
+
+    # Check for invalid quantity
+    for item in items:
+        if item.quantity < 1:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"code": "INVALID_QUANTITY", "message": "Количество должно быть не менее 1 для каждой позиции"}
+            )
+
+    # 5. Check B2B Outage
+    if x_simulate_b2b_outage == "true" or b2b_client.simulate_outage:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": "B2B_UNAVAILABLE", "message": "Сервис товаров временно недоступен, попробуйте позже"}
+        )
+
+    # 6. Check B2B Availability
+    failed_items = []
+    for item in items:
+        sku_data, p = find_sku_and_product_in_b2b(b2b_client._products, item.sku_id)
+        if not sku_data:
+            failed_items.append({
+                "sku_id": str(item.sku_id),
+                "reason": "SKU_NOT_FOUND"
+            })
+        elif p.get("status") in ["BLOCKED", "HARD_BLOCKED"] or p.get("status") != "MODERATED":
+            failed_items.append({
+                "sku_id": str(item.sku_id),
+                "reason": "PRODUCT_BLOCKED"
+            })
+        elif p.get("deleted", False):
+            failed_items.append({
+                "sku_id": str(item.sku_id),
+                "reason": "PRODUCT_DELETED"
+            })
+        else:
+            avail = sku_data.get("available_quantity", 0)
+            if avail == 0:
+                failed_items.append({
+                    "sku_id": str(item.sku_id),
+                    "reason": "OUT_OF_STOCK",
+                    "requested": item.quantity,
+                    "available": 0
+                })
+            elif avail < item.quantity:
+                failed_items.append({
+                    "sku_id": str(item.sku_id),
+                    "reason": "INSUFFICIENT_STOCK",
+                    "requested": item.quantity,
+                    "available": avail
+                })
+
+    if failed_items:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "RESERVE_FAILED",
+                "message": "Не удалось зарезервировать товары",
+                "failed_items": failed_items
+            }
+        )
+
+    # 7. Reserve SKU in B2B (decrease stock)
+    for item in items:
+        found = False
+        for p in b2b_client._products:
+            for s in p.get("skus", []):
+                if s.get("id") == item.sku_id:
+                    s["available_quantity"] -= item.quantity
+                    found = True
+                    break
+            if found:
+                break
+        if not found:
+            for p in b2b_client._products:
+                if p.get("id") == item.sku_id:
+                    p["active_quantity"] = max(0, p.get("active_quantity", 0) - item.quantity)
+                    break
+
+    # 8. Create Order in DB
+    order_id = uuid.uuid4()
+    order_items = []
+    total_amount = 0
+
+    for item in items:
+        sku_data, p = find_sku_and_product_in_b2b(b2b_client._products, item.sku_id)
+        unit_price = sku_data["price"]
+        line_total = unit_price * item.quantity
+        total_amount += line_total
+        order_items.append({
+            "id": uuid.uuid4(),
+            "sku_id": item.sku_id,
+            "product_id": p["id"],
+            "product_title": p["title"],
+            "sku_name": sku_data["name"],
+            "name": f"{p['title']} - {sku_data['name']}",
+            "sku_code": sku_data["sku_code"],
+            "quantity": item.quantity,
+            "unit_price": unit_price,
+            "line_total": line_total,
+            "image_url": sku_data["images"][0]["url"] if sku_data["images"] else (p["images"][0]["url"] if p["images"] else None)
+        })
+
+    now_iso = datetime.datetime.utcnow().isoformat() + "Z"
+    order_data = {
+        "id": order_id,
+        "number": f"NM-2026-{str(uuid.uuid4().fields[0])[:6]}",
+        "buyer_id": user_id,
+        "user_id": user_id,
+        "status": "PAID",
+        "status_history": [
+            {"status": "PAID", "changed_at": now_iso, "reason": "Initial checkout"}
+        ],
+        "items": order_items,
+        "subtotal": total_amount,
+        "total": total_amount,
+        "delivery_cost": 0,
+        "delivery_address": payload.delivery_address or "г. Екатеринбург, ул. Мира 19, кв. 42",
+        "address": {
+            "id": uuid.uuid4(),
+            "country": "Россия",
+            "city": "Екатеринбург",
+            "street": "Мира",
+            "building": "19",
+            "apartment": "42",
+            "created_at": now_iso
+        },
+        "comment": payload.comment,
+        "idempotency_key": idempotency_key,
+        "created_at": now_iso,
+        "updated_at": now_iso,
+        "paid_at": now_iso
+    }
+
+    ORDERS_DB[order_id] = order_data
+
+    # Clear user's cart in CART_DB (B2C)
+    cart_id_str = str(user_id)
+    if cart_id_str in CART_DB:
+         del CART_DB[cart_id_str]
+
+    return order_data
+
+
+@app.get("/api/v1/orders", response_model=PaginatedOrders)
+@app.get("/orders", response_model=PaginatedOrders)
+def list_orders(
+    status: Optional[str] = Query(None),
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    authorization: Optional[str] = Header(None)
+):
+    user_id = get_user_id_from_auth(authorization)
+
+    # Filter by user_id
+    user_orders = [o for o in ORDERS_DB.values() if o.get("buyer_id") == user_id]
+
+    # Filter by status
+    if status:
+        user_orders = [o for o in user_orders if o.get("status") == status]
+
+    # Sort by created_at descending (latest first)
+    user_orders.sort(key=lambda o: o.get("created_at", ""), reverse=True)
+
+    total_count = len(user_orders)
+    paginated = user_orders[offset : offset + limit]
+
+    result = []
+    for o in paginated:
+        order_copy = dict(o)
+        order_copy["items_count"] = sum(item["quantity"] for item in o["items"])
+        result.append(order_copy)
+
+    return {
+        "items": result,
+        "total_count": total_count,
+        "limit": limit,
+        "offset": offset
+    }
+
+
+@app.get("/api/v1/orders/{order_id}", response_model=OrderResponse)
+@app.get("/orders/{order_id}", response_model=OrderResponse)
+def get_order_detail(
+    order_id: UUID,
+    authorization: Optional[str] = Header(None)
+):
+    user_id = get_user_id_from_auth(authorization)
+
+    order = ORDERS_DB.get(order_id)
+    if not order:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "ORDER_NOT_FOUND", "message": "Заказ не найден"}
+        )
+
+    # Ownership check: MUST return 404 (not 403) to prevent IDOR scanning
+    if order.get("buyer_id") != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "ORDER_NOT_FOUND", "message": "Заказ не найден"}
+        )
+
+    return order
+
+
+@app.post("/api/v1/orders/{order_id}/cancel", response_model=OrderResponse)
+@app.post("/orders/{order_id}/cancel", response_model=OrderResponse)
+def cancel_order(
+    order_id: UUID,
+    authorization: Optional[str] = Header(None),
+    x_simulate_b2b_outage: Optional[str] = Header(None, alias="X-Simulate-B2B-Outage")
+):
+    import datetime
+    user_id = get_user_id_from_auth(authorization)
+
+    order = ORDERS_DB.get(order_id)
+    if not order:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "ORDER_NOT_FOUND", "message": "Заказ не найден"}
+        )
+
+    # Ownership: return 404 to hide other orders
+    if order.get("buyer_id") != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "ORDER_NOT_FOUND", "message": "Заказ не найден"}
+        )
+
+    # Status validation: cancel allowed only in CREATED or PAID
+    if order.get("status") not in ["CREATED", "PAID"]:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "CANCEL_NOT_ALLOWED",
+                "message": f"Отмена невозможна: заказ в статусе {order.get('status')}",
+                "current_status": order.get("status")
+            }
+        )
+
+    # If B2B is unavailable, transition to CANCEL_PENDING
+    if x_simulate_b2b_outage == "true" or b2b_client.simulate_outage:
+        now_iso = datetime.datetime.utcnow().isoformat() + "Z"
+        order["status"] = "CANCEL_PENDING"
+        order["updated_at"] = now_iso
+        if "status_history" not in order:
+            order["status_history"] = []
+        order["status_history"].append({"status": "CANCEL_PENDING", "changed_at": now_iso, "reason": "B2B service unavailable"})
+        return order
+
+    # Unreserve SKU in B2B (add stock back)
+    for item in order["items"]:
+        found = False
+        for p in b2b_client._products:
+            for s in p.get("skus", []):
+                if s.get("id") == item["sku_id"]:
+                    s["available_quantity"] += item["quantity"]
+                    found = True
+                    break
+            if found:
+                break
+        if not found:
+            for p in b2b_client._products:
+                if p.get("id") == item["sku_id"]:
+                    p["active_quantity"] = p.get("active_quantity", 0) + item["quantity"]
+                    break
+
+    now_iso = datetime.datetime.utcnow().isoformat() + "Z"
+    order["status"] = "CANCELLED"
+    order["updated_at"] = now_iso
+    if "status_history" not in order:
+        order["status_history"] = []
+    order["status_history"].append({"status": "CANCELLED", "changed_at": now_iso, "reason": "Order cancelled by client"})
+    return order

@@ -148,8 +148,8 @@ export const ChannelDetailModal: React.FC<ChannelDetailModalProps> = ({
                 </div>
                 <div className="flex flex-col rounded-xl bg-slate-950/60 p-3 text-center border border-slate-800">
                   <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400">Доход/мес</span>
-                  <span className="mt-1 font-mono text-base font-bold text-emerald-400">
-                    {Math.round(currentProduct.monthly_income / 100).toLocaleString("ru-RU")} ₽
+                  <span className="mt-1 font-mono text-base font-bold text-emerald-400 whitespace-nowrap">
+                    {Math.round(currentProduct.monthly_income / 100).toLocaleString("ru-RU")}&nbsp;₽
                   </span>
                 </div>
                 <div className="flex flex-col rounded-xl bg-slate-950/60 p-3 text-center border border-slate-800">
@@ -212,8 +212,8 @@ export const ChannelDetailModal: React.FC<ChannelDetailModalProps> = ({
                               </span>
                             </div>
                             <div className="text-right">
-                              <span className="block font-mono text-sm font-extrabold text-white">
-                                {Math.round(sku.price / 100).toLocaleString("ru-RU")} ₽
+                              <span className="block font-mono text-sm font-extrabold text-white whitespace-nowrap">
+                                {Math.round(sku.price / 100).toLocaleString("ru-RU")}&nbsp;₽
                               </span>
                             </div>
                           </button>
@@ -248,12 +248,12 @@ export const ChannelDetailModal: React.FC<ChannelDetailModalProps> = ({
                     <span className="text-xs text-slate-450 uppercase tracking-widest font-semibold block">Итого к оплате</span>
                     <div className="flex items-baseline mt-1.5">
                       {origRubPrice && (
-                        <span className="mr-2 text-xs text-slate-500 line-through font-mono">
-                          {origRubPrice.toLocaleString("ru-RU")} ₽
+                        <span className="mr-2 text-xs text-slate-500 line-through font-mono whitespace-nowrap">
+                          {origRubPrice.toLocaleString("ru-RU")}&nbsp;₽
                         </span>
                       )}
-                      <span className="font-mono text-2xl font-black text-cyan-400 neon-text">
-                        {rubPriceWithDiscount.toLocaleString("ru-RU")}{" "}
+                      <span className="font-mono text-2xl font-black text-cyan-400 neon-text whitespace-nowrap inline-flex items-baseline">
+                        {rubPriceWithDiscount.toLocaleString("ru-RU")}&nbsp;
                         <span className="text-sm font-normal text-slate-350 font-mono">₽</span>
                       </span>
                     </div>
@@ -288,7 +288,7 @@ export const ChannelDetailModal: React.FC<ChannelDetailModalProps> = ({
                         disabled={!selectedSku}
                         className="flex items-center gap-2 rounded-2xl bg-white text-slate-950 px-6 py-3.5 font-sans text-sm font-extrabold transition-all duration-200 hover:bg-cyan-400 hover:text-slate-950 hover:accent-glow active:scale-95 disabled:bg-slate-700 disabled:text-slate-400 disabled:cursor-not-allowed text-nowrap"
                       >
-                        <ShoppingCart className="h-4 w-4" /> В корзину B2C
+                        <ShoppingCart className="h-4 w-4" /> В корзину
                       </button>
                     </div>
                     <div className="flex flex-col items-end gap-0.5">
@@ -354,8 +354,8 @@ export const ChannelDetailModal: React.FC<ChannelDetailModalProps> = ({
                       </div>
                       <div className="mt-4 flex items-baseline justify-between pt-2.5 border-t border-slate-850/80">
                         <span className="text-[10px] text-slate-500 uppercase font-semibold">Цена</span>
-                        <span className="font-mono text-xs font-bold text-white">
-                          {itemPrice.toLocaleString("ru-RU")} ₽
+                        <span className="font-mono text-xs font-bold text-white whitespace-nowrap">
+                          {itemPrice.toLocaleString("ru-RU")}&nbsp;₽
                         </span>
                       </div>
                     </div>

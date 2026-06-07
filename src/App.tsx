@@ -19,7 +19,10 @@ import {
   TrendingUp,
   SlidersHorizontal,
   ChevronRight,
-  X
+  X,
+  ShoppingBag,
+  AlertCircle,
+  XCircle
 } from "lucide-react";
 
 const STATIC_CATEGORIES: CategoryRef[] = [
@@ -74,12 +77,23 @@ export default function App() {
   
   // Real B2C Favorites Database Integration
   const MOCK_JWT = "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhMTExMTExMS1lMjliLTQxZDQtYTcxNi00NDY2NTU0NDAwMDEifQ.mock-signature";
-  const [activeTab, setActiveTab] = useState<"catalog" | "favorites">("catalog");
+  const [activeTab, setActiveTab] = useState<"catalog" | "favorites" | "orders">("catalog");
   const [favorites, setFavorites] = useState<string[]>([]);
   const [favoriteItems, setFavoriteItems] = useState<FavoriteItem[]>([]);
   const [favoritesLoading, setFavoritesLoading] = useState(false);
   const [checkoutFinished, setCheckoutFinished] = useState(false);
   const [subscriptions, setSubscriptions] = useState<string[]>([]);
+
+  // US-ORD-01 Checkout and Order states
+  const [orders, setOrders] = useState<any[]>([]);
+  const [ordersLoading, setOrdersLoading] = useState(false);
+  const [isCheckoutModalOpen, setIsCheckoutModalOpen] = useState(false);
+  const [deliveryAddress, setDeliveryAddress] = useState("г. Екатеринбург, ул. Мира 19, кв. 42");
+  const [checkoutComment, setCheckoutComment] = useState("");
+  const [checkoutError, setCheckoutError] = useState<string | null>(null);
+  const [failedItems, setFailedItems] = useState<any[]>([]);
+  const [isCheckingOut, setIsCheckingOut] = useState(false);
+  const [simulateB2bOutage, setSimulateB2bOutage] = useState(false);
 
   const handleToggleSubscription = async (productId: string) => {
     const isSub = subscriptions.includes(productId);
@@ -263,6 +277,7 @@ export default function App() {
     loadCart(authMode, sId);
     loadBanners();
     loadCollections();
+    loadOrders();
   }, [authMode]);
 
   const handleToggleFavorite = async (productId: string, e?: React.MouseEvent) => {
@@ -541,12 +556,107 @@ export default function App() {
   };
 
   const handleSimulatedCheckout = () => {
-    setCheckoutFinished(true);
-    setTimeout(() => {
-      setCart({ items: [], total_amount: 0 });
-      setCheckoutFinished(false);
-      setIsCartOpen(false);
-    }, 4000);
+    // Open the actual clean checkout popup instead of a fake wait
+    setIsCheckoutModalOpen(true);
+  };
+
+  const loadOrders = async () => {
+    setOrdersLoading(true);
+    try {
+      const headers: Record<string, string> = {
+        "Authorization": MOCK_JWT
+      };
+      if (simulateB2bOutage) {
+        headers["X-Simulate-B2B-Outage"] = "true";
+      }
+      const res = await fetch("/api/v1/orders", { headers });
+      if (res.ok) {
+        const data = await res.json();
+        setOrders(data.items || []);
+      }
+    } catch (err) {
+      console.error("Failed to load orders:", err);
+    } finally {
+      setOrdersLoading(false);
+    }
+  };
+
+  const handleCheckoutSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsCheckingOut(true);
+    setCheckoutError(null);
+    setFailedItems([]);
+
+    try {
+      const idempotencyKey = crypto.randomUUID();
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        "Authorization": MOCK_JWT,
+        "Idempotency-Key": idempotencyKey
+      };
+      if (simulateB2bOutage) {
+        headers["X-Simulate-B2B-Outage"] = "true";
+      }
+
+      const reqItems = cart.items.map(it => ({
+        sku_id: it.sku_id,
+        quantity: it.quantity
+      }));
+
+      const res = await fetch("/api/v1/orders", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          idempotency_key: idempotencyKey,
+          items: reqItems,
+          delivery_address: deliveryAddress,
+          comment: checkoutComment
+        })
+      });
+
+      if (res.ok) {
+        setCart({ items: [], total_amount: 0 });
+        setIsCheckoutModalOpen(false);
+        setIsCartOpen(false);
+        setActiveTab("orders");
+        await loadOrders();
+      } else {
+        const errData = await res.json();
+        if (errData.code === "RESERVE_FAILED" && errData.failed_items) {
+          setCheckoutError("Не удалось зарезервировать часть позиций.");
+          setFailedItems(errData.failed_items);
+        } else {
+          setCheckoutError(errData.message || "Не удалось оформить заказ");
+        }
+      }
+    } catch (err) {
+      setCheckoutError("Произошла сетевая ошибка при оформлении заказа.");
+    } finally {
+      setIsCheckingOut(false);
+    }
+  };
+
+  const handleCancelOrder = async (orderId: string) => {
+    try {
+      const headers: Record<string, string> = {
+        "Authorization": MOCK_JWT
+      };
+      if (simulateB2bOutage) {
+        headers["X-Simulate-B2B-Outage"] = "true";
+      }
+      const res = await fetch(`/api/v1/orders/${orderId}/cancel`, {
+        method: "POST",
+        headers
+      });
+      if (res.ok) {
+        await loadOrders();
+      } else {
+        const errData = await res.json();
+        alert(`Ошибка отмены: ${errData.message || res.statusText}`);
+      }
+    } catch (err) {
+      console.error("Failed to cancel order:", err);
+    }
   };
 
   const cartTotal = cart.total_amount;
@@ -580,7 +690,7 @@ export default function App() {
           <div className="flex items-center gap-1 bg-slate-900/90 border border-slate-800/80 p-1 rounded-2xl shadow-inner shadow-black/40">
             <button
               onClick={() => setActiveTab("catalog")}
-              className={`flex items-center gap-1.5 px-35 py-1.5 rounded-xl text-xs font-black uppercase tracking-wider transition-all duration-150 ${
+              className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-black uppercase tracking-wider transition-all duration-150 ${
                 activeTab === "catalog"
                   ? "bg-slate-800/95 text-white border border-slate-750 shadow-md shadow-black/50"
                   : "text-slate-400 hover:text-white"
@@ -590,7 +700,7 @@ export default function App() {
             </button>
             <button
               onClick={() => setActiveTab("favorites")}
-              className={`flex items-center gap-1.5 px-35 py-1.5 rounded-xl text-xs font-black uppercase tracking-wider transition-all duration-150 relative ${
+              className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-black uppercase tracking-wider transition-all duration-150 relative ${
                 activeTab === "favorites"
                   ? "bg-slate-800/95 text-white border border-slate-750 shadow-md shadow-black/50"
                   : "text-slate-400 hover:text-white"
@@ -600,6 +710,21 @@ export default function App() {
               {favorites.length > 0 && (
                 <span className="flex h-4.5 min-w-[18px] items-center justify-center rounded-full bg-rose-500/20 text-rose-400 text-[9px] font-black font-mono px-1">
                   {favorites.length}
+                </span>
+              )}
+            </button>
+            <button
+              onClick={() => setActiveTab("orders")}
+              className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-black uppercase tracking-wider transition-all duration-150 relative ${
+                activeTab === "orders"
+                  ? "bg-slate-800/95 text-white border border-slate-750 shadow-md shadow-black/50"
+                  : "text-slate-400 hover:text-white"
+              }`}
+            >
+              <ShoppingBag className={`h-3.5 w-3.5 ${activeTab === "orders" || orders.length > 0 ? "text-amber-500" : "text-slate-400"}`} /> Заказы
+              {orders.length > 0 && (
+                <span className="flex h-4.5 min-w-[18px] items-center justify-center rounded-full bg-amber-500/20 text-amber-400 text-[9px] font-black font-mono px-1">
+                  {orders.length}
                 </span>
               )}
             </button>
@@ -954,7 +1079,7 @@ export default function App() {
               </div>
 
           </div>
-        ) : (
+        ) : activeTab === "favorites" ? (
           /* Favorites Tab View */
           <div className="space-y-6">
             
@@ -1011,6 +1136,144 @@ export default function App() {
               </div>
             )}
             
+          </div>
+        ) : (
+          /* Orders Tab View (US-ORD-01) */
+          <div className="space-y-6">
+            
+            {/* Header Orders Banner */}
+            <div className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-slate-900 via-slate-950 to-slate-950 p-6 md:p-8 text-white border border-slate-800 shadow-xl flex flex-col md:flex-row md:items-center md:justify-between gap-4 text-left">
+              <div className="max-w-xl">
+                <h1 className="font-sans text-xl md:text-2xl font-black text-white leading-tight flex items-center gap-2">
+                  <ShoppingBag className="h-6 w-6 text-amber-500" /> Мои Заказы
+                </h1>
+                <p className="text-slate-400 text-xs mt-1 leading-normal font-medium">Пожизненный мониторинг, резервирование прав и фиксация цены на бирже NeoMarket.</p>
+              </div>
+
+              {/* B2B Simulation Controller */}
+              <div className="flex items-center gap-3 bg-slate-950 border border-slate-850 p-2.5 rounded-xl self-start md:self-auto">
+                <div className="text-left">
+                  <span className="text-[9px] font-bold text-amber-500 uppercase tracking-widest block">Симуляция сбоев B2B:</span>
+                  <span className="text-[8px] text-slate-500 block leading-tight mt-0.5">Влияет на резерв / отмену</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setSimulateB2bOutage(!simulateB2bOutage)}
+                  className={`px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-wider transition-all ${
+                    simulateB2bOutage 
+                      ? "bg-amber-600 text-slate-950 hover:bg-amber-500" 
+                      : "bg-slate-900 text-slate-400 hover:text-white hover:bg-slate-850 border border-slate-800"
+                  }`}
+                >
+                  {simulateB2bOutage ? "⚠️ Сбой Активен" : "✅ В норме"}
+                </button>
+              </div>
+            </div>
+
+            {ordersLoading ? (
+              <div className="flex flex-col items-center justify-center py-20">
+                <div className="h-8 w-8 animate-spin rounded-full border-2 border-amber-500 border-t-transparent" />
+                <span className="mt-4 text-xs font-semibold text-slate-450 font-mono">Синхронизация заказов...</span>
+              </div>
+            ) : orders.length === 0 ? (
+              <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-slate-800 bg-slate-900/20 py-16 px-4 text-center">
+                <div className="flex h-12 w-12 items-center justify-center rounded-full bg-slate-900 border border-slate-800 text-amber-500">
+                  <ShoppingBag className="h-6 w-6" />
+                </div>
+                <h3 className="mt-4 font-sans text-sm font-bold text-white font-mono">Список заказов пуст</h3>
+                <p className="mt-1 text-xs text-slate-500 max-w-sm leading-normal">
+                  Вы пока не совершили ни одной покупки через наш маркетплейс.
+                </p>
+                <button
+                  onClick={() => setActiveTab("catalog")}
+                  className="mt-5 rounded-2xl bg-white text-slate-950 px-5 py-2.5 text-xs font-black hover:bg-cyan-400 hover:text-slate-950 transition-colors"
+                >
+                  Перейти в Каталог
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-6 text-left">
+                {orders.map((order) => (
+                  <div key={order.id} className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl relative overflow-hidden transition-all hover:border-slate-700">
+                    <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800 pb-4 mb-4">
+                      <div className="text-left">
+                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest font-mono">Заказ</span>
+                        <h3 className="text-sm font-black text-white leading-normal mt-0.5">{order.number}</h3>
+                        <span className="text-[10px] text-slate-500 block font-mono mt-0.5">Создан: {new Date(order.created_at).toLocaleString("ru-RU")}</span>
+                      </div>
+
+                      <div className="flex items-center gap-3">
+                        <div className="text-right hidden sm:block">
+                          <span className="text-[9px] text-slate-500 uppercase tracking-widest font-semibold block">Сумма заказа</span>
+                          <span className="block font-mono text-sm font-black text-cyan-400 mt-0.5 whitespace-nowrap">{Math.round(order.total / 100).toLocaleString("ru-RU")}&nbsp;₽</span>
+                        </div>
+
+                        {/* Status Badge */}
+                        <span className={`px-2.5 py-1 rounded-lg text-[9px] font-black uppercase tracking-wider ${
+                          order.status === "PAID" ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" :
+                          order.status === "CANCELLED" ? "bg-rose-500/10 text-rose-400 border border-rose-500/20" :
+                          order.status === "CANCEL_PENDING" ? "bg-amber-500/10 text-amber-500 border border-amber-500/20" :
+                          "bg-slate-850 text-slate-400 border border-slate-800"
+                        }`}>
+                          {order.status === "PAID" ? "Оплачен" :
+                           order.status === "CANCELLED" ? "Отменен" :
+                           order.status === "CANCEL_PENDING" ? "Ожидает отмены (B2B сбой)" : order.status}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Bought Items inside order */}
+                    <div className="space-y-3 mb-4">
+                      {order.items.map((item: any) => (
+                        <div key={item.id} className="flex items-center justify-between gap-4 bg-slate-950/40 p-3 rounded-xl border border-slate-850">
+                          <div className="flex items-center gap-3 text-left">
+                            {item.image_url ? (
+                              <img src={item.image_url} alt={item.name} className="h-10 w-10 rounded-lg object-cover border border-slate-800 shrink-0" referrerPolicy="no-referrer" />
+                            ) : (
+                              <div className="h-10 w-10 rounded-lg bg-slate-900 border border-slate-800 flex items-center justify-center shrink-0">
+                                <ShoppingBag className="h-5 w-5 text-slate-650" />
+                              </div>
+                            )}
+                            <div>
+                              <h4 className="text-xs font-bold text-white leading-normal">{item.name}</h4>
+                              <span className="text-[10px] text-slate-500 font-mono block mt-0.5">Код SKU: {item.sku_code} • {item.quantity} шт.</span>
+                            </div>
+                          </div>
+
+                          <span className="text-xs font-mono font-bold text-slate-300 whitespace-nowrap">{Math.round(item.unit_price * item.quantity / 100).toLocaleString("ru-RU")}&nbsp;₽</span>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Footer Address & Action Buttons */}
+                    <div className="flex flex-wrap items-center justify-between gap-4 pt-4 border-t border-slate-800 text-left text-xs text-slate-400">
+                      <div>
+                        {order.delivery_address && (
+                          <p className="mt-1 text-[10px] text-slate-500 leading-normal flex items-start gap-1">
+                            <span>📍 Адрес получения:</span> <strong className="text-slate-400 font-bold">{order.delivery_address}</strong>
+                          </p>
+                        )}
+                        {order.comment && (
+                          <p className="mt-0.5 text-[10px] text-slate-500 leading-normal flex items-start gap-1">
+                            <span>💬 Доп. инструкция:</span> <span className="italic text-slate-400">{order.comment}</span>
+                          </p>
+                        )}
+                      </div>
+
+                      {(order.status === "CREATED" || order.status === "PAID") && (
+                        <button
+                          type="button"
+                          onClick={() => handleCancelOrder(order.id)}
+                          className="px-3.5 py-1.5 rounded-xl border border-rose-500/20 bg-rose-500/10 text-rose-400 text-[10px] font-black uppercase hover:bg-rose-500 hover:text-slate-950 transition-all font-mono shadow-md"
+                        >
+                          ❌ Отменить заказ
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
@@ -1081,8 +1344,8 @@ export default function App() {
                           </div>
                           
                           <div className="text-right shrink-0 ml-2">
-                            <span className="block font-mono text-xs font-extrabold text-white">
-                              {skuSubtotal.toLocaleString("ru-RU")} ₽
+                            <span className="block font-mono text-xs font-extrabold text-white whitespace-nowrap">
+                              {skuSubtotal.toLocaleString("ru-RU")}&nbsp;₽
                             </span>
                             {!isUnavailable && (
                               <div className="flex items-center gap-1 justify-end mt-2 bg-slate-950 border border-slate-800 rounded-lg p-0.5 max-w-max ml-auto shadow-inner">
@@ -1142,23 +1405,17 @@ export default function App() {
                 <div className="flex items-center justify-between">
                   <div>
                     <span className="text-[9px] text-slate-400 uppercase tracking-widest font-semibold block">Итого к оплате</span>
-                    <span className="block font-mono text-base font-extrabold text-cyan-400 neon-text mt-1">
-                      {Math.round(cartTotal / 100).toLocaleString("ru-RU")} ₽
+                    <span className="block font-mono text-base font-extrabold text-cyan-400 neon-text mt-1 whitespace-nowrap">
+                      {Math.round(cartTotal / 100).toLocaleString("ru-RU")}&nbsp;₽
                     </span>
                   </div>
                   <button
-                    onClick={handleSimulatedCheckout}
-                    disabled={checkoutFinished}
-                    className="rounded-xl bg-white text-slate-900 px-5 py-2.5 text-xs font-extrabold hover:bg-cyan-400 hover:text-slate-950 disabled:bg-emerald-600 disabled:text-white transition-all duration-200 shadow-lg"
+                    onClick={() => setIsCheckoutModalOpen(true)}
+                    className="rounded-xl bg-white text-slate-900 px-5 py-2.5 text-xs font-extrabold hover:bg-cyan-400 hover:text-slate-950 transition-all duration-200 shadow-lg"
                   >
-                    {checkoutFinished ? "🎉 Оплата принята!" : "Купить активы"}
+                    Оформить заказ
                   </button>
                 </div>
-                {checkoutFinished && (
-                  <div className="mt-3 rounded-xl bg-emerald-950/80 border border-emerald-900/50 p-3 text-center text-[10px] text-emerald-400 font-semibold leading-relaxed">
-                    Заказ NM-2026-000452 успешно создан! Отправлен на B2B-раннер. Права передаются через Безопасный Гарант.
-                  </div>
-                )}
               </div>
             )}
           </div>
@@ -1182,6 +1439,122 @@ export default function App() {
           isSubscribed={subscriptions.includes(selectedProductId)}
           onToggleSubscription={handleToggleSubscription}
         />
+      )}
+
+      {/* Checkout Confirmation Modal (US-ORD-01) */}
+      {isCheckoutModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
+          <div className="relative w-full max-w-lg overflow-hidden rounded-3xl border border-slate-800 bg-slate-900 shadow-2xl p-6 text-left">
+            
+            {/* Header close */}
+            <div className="flex items-center justify-between border-b border-slate-800 pb-4 mb-4">
+              <div>
+                <h3 className="text-base font-black text-white uppercase tracking-wider font-sans">Оформление Заказа</h3>
+                <p className="text-[10px] text-slate-400 mt-1">Подтвердите реквизиты получения и проверьте корзину перед резервацией.</p>
+              </div>
+              <button 
+                type="button"
+                onClick={() => setIsCheckoutModalOpen(false)}
+                className="rounded-xl border border-slate-850 p-2 text-slate-400 hover:text-white transition-colors"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            {/* Error alerts */}
+            {checkoutError && (
+              <div className="mb-4 rounded-xl bg-rose-500/10 border border-rose-500/20 p-3.5 text-xs text-rose-400 font-semibold flex items-start gap-2">
+                <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <span>{checkoutError}</span>
+                  {failedItems.length > 0 && (
+                    <div className="mt-2 space-y-1 border-t border-rose-500/25 pt-2 text-[11px] font-medium text-slate-300">
+                      <span className="block text-rose-400 font-black">Сбойные позиции:</span>
+                      {failedItems.map((f: any, idx) => (
+                        <div key={idx} className="flex justify-between">
+                          <span>SKU: {f.sku_id}</span>
+                          <span className="text-rose-400 font-bold">{f.reason}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Form */}
+            <form onSubmit={handleCheckoutSubmit} className="space-y-4">
+              {/* Delivery Address */}
+              <div className="space-y-1.5">
+                <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider font-mono">Адрес доставки / Получатель:</label>
+                <input
+                  type="text"
+                  required
+                  value={deliveryAddress}
+                  onChange={(e) => setDeliveryAddress(e.target.value)}
+                  placeholder="ФИО, город, адрес доставки..."
+                  className="w-full text-xs font-semibold rounded-xl border border-slate-800 bg-slate-950 px-3.5 py-2.5 text-slate-200 focus:outline-none focus:ring-1 focus:ring-cyan-400"
+                />
+              </div>
+
+              {/* Comment */}
+              <div className="space-y-1.5">
+                <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider font-mono">Дополнительный комментарий (опционально):</label>
+                <textarea
+                  value={checkoutComment}
+                  onChange={(e) => setCheckoutComment(e.target.value)}
+                  placeholder="Временные требования, инструкции по передаче прав..."
+                  rows={2}
+                  className="w-full text-xs font-semibold rounded-xl border border-slate-800 bg-slate-950 px-3.5 py-2.5 text-slate-200 focus:outline-none focus:ring-1 focus:ring-cyan-400 resize-none"
+                />
+              </div>
+
+              {/* Items Summary list with Price Lock demonstration */}
+              <div className="space-y-2 border-t border-b border-slate-800/80 py-4 my-2">
+                <span className="block text-[9px] font-black text-slate-455 uppercase tracking-widest font-mono">Резюме Корзины (Фиксация цены):</span>
+                <div className="max-h-28 overflow-y-auto space-y-2 pr-1">
+                  {cart.items.map((it) => (
+                    <div key={it.sku_id} className="flex justify-between items-center text-xs font-mono">
+                      <span className="text-slate-350 font-sans font-semibold truncate max-w-[70%]">
+                        {it.product?.title || "Канал " + it.sku_id} ({it.sku?.name || "Аббонемент"}) x {it.quantity} шт.
+                      </span>
+                      <span className="text-white font-extrabold whitespace-nowrap">{Math.round(it.subtotal / 100).toLocaleString("ru-RU")}&nbsp;₽</span>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="flex justify-between items-center pt-2 text-xs font-bold border-t border-slate-850">
+                  <span className="text-slate-400">Итого:</span>
+                  <span className="font-mono text-sm font-extrabold text-cyan-400 whitespace-nowrap">{Math.round(cartTotal / 100).toLocaleString("ru-RU")}&nbsp;₽</span>
+                </div>
+              </div>
+
+              {/* Submits */}
+              <div className="flex items-center justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setIsCheckoutModalOpen(false)}
+                  className="px-4 py-2.5 rounded-xl border border-slate-800 bg-transparent text-xs font-black uppercase text-slate-400 hover:text-white transition-colors"
+                >
+                  Отмена
+                </button>
+                <button
+                  type="submit"
+                  disabled={isCheckingOut}
+                  className="px-5 py-2.5 rounded-xl bg-cyan-400 text-slate-950 text-xs font-black uppercase hover:bg-cyan-300 disabled:bg-slate-800 disabled:text-slate-500 transition-all flex items-center gap-1.5"
+                >
+                  {isCheckingOut ? (
+                    <>
+                      <div className="h-3 w-3 animate-spin rounded-full border border-slate-950 border-t-transparent" />
+                      Резервирование...
+                    </>
+                  ) : "Оформить заказ"}
+                </button>
+              </div>
+            </form>
+
+          </div>
+        </div>
       )}
 
     </div>
