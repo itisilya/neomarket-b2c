@@ -290,14 +290,19 @@ class B2BUnreserveRequest(BaseModel):
     items: List[B2BReserveItem]
 
 
+class B2BFulfillRequest(BaseModel):
+    order_id: UUID
+    items: List[B2BReserveItem]
+
+
 class OrderItemRequest(BaseModel):
     sku_id: UUID
     quantity: int
 
 
 class OrderCreateRequest(BaseModel):
-    address_id: UUID
-    payment_method_id: UUID
+    address_id: Optional[UUID] = None
+    payment_method_id: Optional[UUID] = None
     comment: Optional[str] = None
     idempotency_key: Optional[UUID] = None
     items: Optional[List[OrderItemRequest]] = None

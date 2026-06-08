@@ -15,7 +15,7 @@ from app.schemas import (
     CartItemAddRequest, CartItemUpdateRequest, CartItemResponse, CartResponse, CartMergeRequest,
     BannerResponse, BannerEventRequest, Collection, CollectionDetailResponse,
     OrderItemRequest, OrderCreateRequest, OrderItemResponse, OrderResponse, PaginatedOrders,
-    OrderCancelRequest, OrderStatusUpdateRequest, B2BReserveRequest, AddressResponse, B2BUnreserveRequest
+    OrderCancelRequest, OrderStatusUpdateRequest, B2BReserveRequest, AddressResponse, B2BUnreserveRequest, B2BFulfillRequest
 )
 from app.b2b_client import B2BClient
 
@@ -29,7 +29,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -2293,7 +2293,9 @@ def change_order_status(order_id: UUID, new_status: str) -> Dict[str, Any]:
         # Trigger fulfill to B2B
         items_payload = [{"sku_id": str(item["sku_id"]), "quantity": item["quantity"]} for item in order["items"]]
         try:
-            b2b_client.fulfill(str(order_id), items_payload, {"X-Service-Key": b2b_client.service_key})
+            res = b2b_client.fulfill(str(order_id), items_payload, {"X-Service-Key": b2b_client.service_key})
+            if not res.get("success", False):
+                raise Exception(f"B2B Fulfill returned failure: {res}")
         except Exception as e:
             PENDING_FULFILLS.append((order_id, items_payload))
             print(f"B2B Fulfill failed, enqueued to PENDING_FULFILLS: {e}")
@@ -2327,7 +2329,9 @@ def trigger_retry_pending_fulfills():
     still_pending = []
     for ord_id, items in PENDING_FULFILLS:
         try:
-            b2b_client.fulfill(str(ord_id), items, {"X-Service-Key": b2b_client.service_key})
+            res = b2b_client.fulfill(str(ord_id), items, {"X-Service-Key": b2b_client.service_key})
+            if not res.get("success", False):
+                raise Exception(f"B2B Fulfill returned failure: {res}")
         except Exception:
             still_pending.append((ord_id, items))
     PENDING_FULFILLS.clear()
@@ -2539,3 +2543,30 @@ def b2b_inventory_unreserve(
                     break
 
     return {"unreserved": True}
+
+
+@app.post("/api/v1/inventory/fulfill")
+def b2b_inventory_fulfill(
+    payload: B2BFulfillRequest,
+    x_service_key: Optional[str] = Header(None, alias="X-Service-Key")
+):
+    # 1. Auth check
+    if not x_service_key or x_service_key != b2b_client.service_key:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "UNAUTHORIZED", "message": "Invalid service key"}
+        )
+
+    # 2. Simulate outage if needed
+    if b2b_client.simulate_outage:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": "B2B_UNAVAILABLE", "message": "B2B Service out"}
+        )
+
+    order_id_str = str(payload.order_id)
+    if order_id_str in b2b_client.fulfilled_orders:
+        return {"fulfilled": True}
+
+    b2b_client.fulfilled_orders.add(order_id_str)
+    return {"fulfilled": True}

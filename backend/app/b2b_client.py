@@ -402,13 +402,58 @@ class B2BClient:
         return visible_set
 
     def fulfill(self, order_id: str, items: List[Dict[str, Any]], headers: Dict[str, str]) -> Dict[str, Any]:
+        """
+        US-ORD-05: Real B2B inventory fulfillment over HTTP POST.
+        We make a POST request to {base_url}/api/v1/inventory/fulfill
+        with headers containing X-Service-Key.
+        """
         if self.simulate_outage:
             raise Exception("B2B Connection Failed")
         self._check_auth(headers)
-        if order_id in self.fulfilled_orders:
-            return {"fulfilled": True}
-        self.fulfilled_orders.add(order_id)
-        return {"fulfilled": True}
+
+        import httpx
+        import os
+        base_url = os.getenv("B2B_BASE_URL", "http://b2b-service").rstrip("/")
+        service_key = headers.get("X-Service-Key", self.service_key)
+        
+        payload = {
+            "order_id": order_id,
+            "items": items
+        }
+        
+        try:
+            response = httpx.post(
+                f"{base_url}/api/v1/inventory/fulfill",
+                json=payload,
+                headers={"X-Service-Key": service_key},
+                timeout=10.0
+            )
+            
+            if response.status_code == 503:
+                return {
+                    "success": False,
+                    "status_code": 503,
+                    "detail": {"code": "B2B_UNAVAILABLE", "message": "B2B Connection Failed"}
+                }
+                
+            if response.status_code != 200:
+                try:
+                    data = response.json()
+                except Exception:
+                    data = {"message": response.text}
+                return {
+                    "success": False,
+                    "status_code": response.status_code,
+                    "detail": data.get("detail", data)
+                }
+                
+            return {
+                "success": True,
+                "status_code": 200,
+                "data": response.json()
+            }
+        except Exception as e:
+            raise Exception(f"B2B Connection Failed: {e}")
 
     def reserve(self, idempotency_key: str, items: List[Dict[str, Any]], headers: Dict[str, str]) -> Dict[str, Any]:
         """
