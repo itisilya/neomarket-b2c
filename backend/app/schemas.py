@@ -319,3 +319,7 @@ class PaginatedOrders(BaseModel):
 
 class OrderCancelRequest(BaseModel):
     reason: Optional[str] = None
+
+
+class OrderStatusUpdateRequest(BaseModel):
+    status: str

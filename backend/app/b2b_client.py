@@ -10,6 +10,7 @@ class B2BClient:
         self.service_key = service_key
         self.headers = {"X-Service-Key": self.service_key}
         self.simulate_outage = False
+        self.fulfilled_orders = set()
 
         # Raw B2B Database seeding
         # This simulates B2B-side data before applying standard filter rules
@@ -398,3 +399,12 @@ class B2BClient:
             if p["status"] == "MODERATED" and not p["deleted"] and p["active_quantity"] > 0:
                 visible_set.append(p)
         return visible_set
+
+    def fulfill(self, order_id: str, items: List[Dict[str, Any]], headers: Dict[str, str]) -> Dict[str, Any]:
+        if self.simulate_outage:
+            raise Exception("B2B Connection Failed")
+        self._check_auth(headers)
+        if order_id in self.fulfilled_orders:
+            return {"fulfilled": True}
+        self.fulfilled_orders.add(order_id)
+        return {"fulfilled": True}

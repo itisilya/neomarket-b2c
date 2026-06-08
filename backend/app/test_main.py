@@ -1543,3 +1543,127 @@ def test_orders_not_affected_by_product_blocked():
     assert len(get_order_data["items"]) >= 1
     assert get_order_data["items"][0]["sku_id"] == sku_id
     assert get_order_data["status"] == "PAID"
+
+
+def test_delivered_status_triggers_fulfill_to_b2b():
+    from app.main import b2b_client
+    b2b_client.simulate_outage = False
+    b2b_client.fulfilled_orders.clear()
+    
+    sku_id = "00000000-0000-0000-0000-000000000001"
+    user_id = "a1111111-e29b-41d4-a716-446655449999"
+    token = create_mock_jwt(user_id)
+    idempotency_key = "10000000-abcd-ef01-2345-6789abcdef01"
+    
+    # Place order
+    response = client.post(
+        "/api/v1/orders",
+        json={
+            "idempotency_key": idempotency_key,
+            "items": [{"sku_id": sku_id, "quantity": 1}],
+            "address_id": "e2020000-e29b-41d4-a716-446655440001",
+            "payment_method_id": "e3030000-e29b-41d4-a716-446655440001"
+        },
+        headers={"Authorization": token, "Idempotency-Key": idempotency_key}
+    )
+    assert response.status_code == 201
+    order_id = response.json()["id"]
+    
+    # Change status to DELIVERED
+    status_response = client.post(
+        f"/api/v1/orders/{order_id}/status",
+        json={"status": "DELIVERED"},
+        headers={"Authorization": token}
+    )
+    assert status_response.status_code == 200
+    assert status_response.json()["status"] == "DELIVERED"
+    
+    # Verify fulfill was triggered in B2B
+    assert order_id in b2b_client.fulfilled_orders
+
+
+def test_fulfill_failure_retried_asynchronously():
+    from app.main import b2b_client, PENDING_FULFILLS
+    b2b_client.simulate_outage = False
+    b2b_client.fulfilled_orders.clear()
+    PENDING_FULFILLS.clear()
+    
+    sku_id = "00000000-0000-0000-0000-000000000001"
+    user_id = "a1111111-e29b-41d4-a716-446655449999"
+    token = create_mock_jwt(user_id)
+    idempotency_key = "20000000-abcd-ef01-2345-6789abcdef02"
+    
+    # Place order
+    response = client.post(
+        "/api/v1/orders",
+        json={
+            "idempotency_key": idempotency_key,
+            "items": [{"sku_id": sku_id, "quantity": 1}],
+            "address_id": "e2020000-e29b-41d4-a716-446655440001",
+            "payment_method_id": "e3030000-e29b-41d4-a716-446655440001"
+        },
+        headers={"Authorization": token, "Idempotency-Key": idempotency_key}
+    )
+    assert response.status_code == 201
+    order_id = response.json()["id"]
+    
+    # Set simulate_outage to True to simulate B2B offline / fail when deliver is done
+    b2b_client.simulate_outage = True
+    
+    # Change status to DELIVERED while B2B has outage
+    status_response = client.post(
+        f"/api/v1/orders/{order_id}/status",
+        json={"status": "DELIVERED"},
+        headers={"Authorization": token}
+    )
+    assert status_response.status_code == 200
+    assert status_response.json()["status"] == "DELIVERED"
+    
+    # Verify order_id is NOT in fulfilled_orders (since it failed)
+    assert order_id not in b2b_client.fulfilled_orders
+    
+    # Verify it is recorded in PENDING_FULFILLS queue
+    assert any(str(p_ord_id) == str(order_id) for p_ord_id, items in PENDING_FULFILLS)
+    
+    # Restore B2B and trigger retry
+    b2b_client.simulate_outage = False
+    retry_response = client.post("/api/v1/orders/retry-fulfills")
+    assert retry_response.status_code == 200
+    assert retry_response.json()["pending_count"] == 0
+    
+    # Now verify it got fulfilled
+    assert order_id in b2b_client.fulfilled_orders
+
+
+def test_repeated_fulfill_idempotent():
+    from app.main import b2b_client
+    b2b_client.simulate_outage = False
+    b2b_client.fulfilled_orders.clear()
+    
+    sku_id = "00000000-0000-0000-0000-000000000001"
+    user_id = "a1111111-e29b-41d4-a716-446655449999"
+    token = create_mock_jwt(user_id)
+    idempotency_key = "30000000-abcd-ef01-2345-6789abcdef03"
+    
+    # Place order
+    response = client.post(
+        "/api/v1/orders",
+        json={
+            "idempotency_key": idempotency_key,
+            "items": [{"sku_id": sku_id, "quantity": 1}],
+            "address_id": "e2020000-e29b-41d4-a716-446655440001",
+            "payment_method_id": "e3030000-e29b-41d4-a716-446655440001"
+        },
+        headers={"Authorization": token, "Idempotency-Key": idempotency_key}
+    )
+    assert response.status_code == 201
+    order_id = response.json()["id"]
+    
+    # Call fulfill via model/b2b client directly once
+    items = [{"sku_id": sku_id, "quantity": 1}]
+    res1 = b2b_client.fulfill(str(order_id), items, {"X-Service-Key": b2b_client.service_key})
+    assert res1 == {"fulfilled": True}
+    
+    # Call again with same order_id, should return 200/fulfilled successfully without errors (idempotent)
+    res2 = b2b_client.fulfill(str(order_id), items, {"X-Service-Key": b2b_client.service_key})
+    assert res2 == {"fulfilled": True}
