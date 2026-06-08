@@ -672,6 +672,33 @@ export default function App() {
     }
   };
 
+  const handleUpdateOrderStatus = async (orderId: string, status: string) => {
+    try {
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        "Authorization": MOCK_JWT
+      };
+      if (simulateB2bOutage) {
+        headers["X-Simulate-B2B-Outage"] = "true";
+      }
+      const res = await fetch(`/api/v1/orders/${orderId}/status`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ status })
+      });
+      if (res.ok) {
+        setOrderErrors(prev => ({ ...prev, [orderId]: "" }));
+        await loadOrders();
+      } else {
+        const errData = await res.json();
+        setOrderErrors(prev => ({ ...prev, [orderId]: errData.message || res.statusText }));
+      }
+    } catch (err) {
+      console.error("Failed to update status:", err);
+      setOrderErrors(prev => ({ ...prev, [orderId]: "Сетевая ошибка при обновлении статуса." }));
+    }
+  };
+
   const cartTotal = cart.total_amount;
   const isDefaultHome = !selectedCategoryId && !searchQuery && !priceMin && !priceMax && !verifiedOnly;
 
@@ -1253,10 +1280,12 @@ export default function App() {
                           order.status === "PAID" ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" :
                           order.status === "CANCELLED" ? "bg-rose-500/10 text-rose-400 border border-rose-500/20" :
                           order.status === "CANCEL_PENDING" ? "bg-amber-500/10 text-amber-500 border border-amber-500/20" :
+                          order.status === "DELIVERED" ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" :
                           "bg-slate-850 text-slate-400 border border-slate-800"
                         }`}>
                           {order.status === "PAID" ? "Оплачен" :
                            order.status === "CANCELLED" ? "Отменен" :
+                           order.status === "DELIVERED" ? "Доставлен" :
                            order.status === "CANCEL_PENDING" ? "Ожидает отмены (B2B сбой)" : order.status}
                         </span>
                       </div>
@@ -1300,20 +1329,51 @@ export default function App() {
                         )}
                       </div>
 
-                      {(order.status === "CREATED" || order.status === "PAID") && (
+                      {order.status !== "CANCELLED" && order.status !== "DELIVERED" && (
                         <div className="flex flex-col items-end gap-1.5">
-                          <button
-                            type="button"
-                            onClick={() => handleCancelOrder(order.id)}
-                            className="px-3.5 py-1.5 rounded-xl border border-rose-500/20 bg-rose-500/10 text-rose-400 text-[10px] font-black uppercase hover:bg-rose-500 hover:text-slate-950 transition-all font-mono shadow-md cursor-pointer"
-                          >
-                            ❌ Отменить заказ
-                          </button>
+                          <div className="flex flex-wrap items-center gap-2">
+                            {(order.status === "CREATED" || order.status === "PAID") && (
+                              <button
+                                type="button"
+                                onClick={() => handleCancelOrder(order.id)}
+                                className="px-3.5 py-1.5 rounded-xl border border-rose-500/20 bg-rose-500/10 text-rose-400 text-[10px] font-black uppercase hover:bg-rose-500 hover:text-slate-950 transition-all font-mono shadow-md cursor-pointer"
+                              >
+                                ❌ Отменить заказ
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => handleUpdateOrderStatus(order.id, "DELIVERED")}
+                              className="px-3.5 py-1.5 rounded-xl border border-cyan-500/30 bg-cyan-500/20 text-cyan-400 text-[10px] font-black uppercase hover:bg-cyan-400 hover:text-slate-950 transition-all font-mono shadow-md cursor-pointer"
+                            >
+                              🚚 Доставить (DELIVERED)
+                            </button>
+                          </div>
                           {orderErrors[order.id] && (
                             <span className="text-[9px] font-mono font-bold text-rose-400 max-w-[200px] text-right">
                               ⚠️ {orderErrors[order.id]}
                             </span>
                           )}
+                        </div>
+                      )}
+
+                      {order.status === "DELIVERED" && (
+                        <div className="flex flex-col items-end gap-1">
+                          <span className="text-[10px] font-mono font-bold text-emerald-400">
+                            ✨ Резерв списан в B2B
+                          </span>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              try {
+                                const r = await fetch("/api/v1/orders/retry-fulfills", { method: "POST" });
+                                if (r.ok) await loadOrders();
+                              } catch(e) {}
+                            }}
+                            className="px-2.5 py-1 rounded-lg border border-slate-800 bg-slate-950 text-[9px] text-slate-400 font-mono hover:bg-slate-8 w-fit shrink-0 cursor-pointer"
+                          >
+                            🔄 Повторить ручную синхронизацию B2B
+                          </button>
                         </div>
                       )}
                     </div>

@@ -15,7 +15,7 @@ from app.schemas import (
     CartItemAddRequest, CartItemUpdateRequest, CartItemResponse, CartResponse, CartMergeRequest,
     BannerResponse, BannerEventRequest, Collection, CollectionDetailResponse,
     OrderItemRequest, OrderCreateRequest, OrderItemResponse, OrderResponse, PaginatedOrders,
-    OrderCancelRequest
+    OrderCancelRequest, OrderStatusUpdateRequest
 )
 from app.b2b_client import B2BClient
 
@@ -890,6 +890,7 @@ COLLECTIONS_DB: Dict[UUID, Dict[str, Any]] = {
 # Simulated B2C database for orders
 # Key: order_id (UUID), Value: Dict of order details
 ORDERS_DB: Dict[UUID, Dict[str, Any]] = {}
+PENDING_FULFILLS: List[tuple] = []
 
 
 def decode_jwt(token: str) -> dict:
@@ -2294,6 +2295,65 @@ def cancel_order(
     order["status_history"].append({"status": "CANCELLED", "changed_at": now_iso, "reason": reason_msg})
     order["cancel_reason"] = reason_str
     return order
+
+
+def change_order_status(order_id: UUID, new_status: str) -> Dict[str, Any]:
+    import datetime
+    order = ORDERS_DB.get(order_id)
+    if not order:
+        return {}
+    
+    order["status"] = new_status
+    now_iso = datetime.datetime.utcnow().isoformat() + "Z"
+    order["updated_at"] = now_iso
+    if "status_history" not in order:
+        order["status_history"] = []
+    order["status_history"].append({"status": new_status, "changed_at": now_iso, "reason": f"Status changed to {new_status}"})
+    if new_status == "DELIVERED":
+        order["delivered_at"] = now_iso
+        # Trigger fulfill to B2B
+        items_payload = [{"sku_id": str(item["sku_id"]), "quantity": item["quantity"]} for item in order["items"]]
+        try:
+            b2b_client.fulfill(str(order_id), items_payload, {"X-Service-Key": b2b_client.service_key})
+        except Exception as e:
+            PENDING_FULFILLS.append((order_id, items_payload))
+            print(f"B2B Fulfill failed, enqueued to PENDING_FULFILLS: {e}")
+            
+    return order
+
+
+@app.post("/api/v1/orders/{order_id}/status", response_model=OrderResponse)
+@app.patch("/api/v1/orders/{order_id}/status", response_model=OrderResponse)
+@app.post("/orders/{order_id}/status", response_model=OrderResponse)
+def update_order_status(
+    order_id: UUID,
+    payload: OrderStatusUpdateRequest,
+    authorization: Optional[str] = Header(None)
+):
+    order = ORDERS_DB.get(order_id)
+    if not order:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "ORDER_NOT_FOUND", "message": "Заказ не найден"}
+        )
+
+    # Allow custom JWT user/operator or simulate transition
+    updated = change_order_status(order_id, payload.status)
+    return updated
+
+
+@app.post("/api/v1/orders/retry-fulfills")
+@app.post("/orders/retry-fulfills")
+def trigger_retry_pending_fulfills():
+    still_pending = []
+    for ord_id, items in PENDING_FULFILLS:
+        try:
+            b2b_client.fulfill(str(ord_id), items, {"X-Service-Key": b2b_client.service_key})
+        except Exception:
+            still_pending.append((ord_id, items))
+    PENDING_FULFILLS.clear()
+    PENDING_FULFILLS.extend(still_pending)
+    return {"pending_count": len(PENDING_FULFILLS)}
 
 
 @app.post("/api/v1/events/product")
