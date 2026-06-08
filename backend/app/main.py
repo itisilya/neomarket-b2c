@@ -15,7 +15,7 @@ from app.schemas import (
     CartItemAddRequest, CartItemUpdateRequest, CartItemResponse, CartResponse, CartMergeRequest,
     BannerResponse, BannerEventRequest, Collection, CollectionDetailResponse,
     OrderItemRequest, OrderCreateRequest, OrderItemResponse, OrderResponse, PaginatedOrders,
-    OrderCancelRequest, OrderStatusUpdateRequest, B2BReserveRequest, AddressResponse
+    OrderCancelRequest, OrderStatusUpdateRequest, B2BReserveRequest, AddressResponse, B2BUnreserveRequest, B2BFulfillRequest
 )
 from app.b2b_client import B2BClient
 
@@ -29,7 +29,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -2235,28 +2235,41 @@ def cancel_order(
         order["cancel_reason"] = reason_str
         return order
 
-    # Unreserve SKU in B2B (add stock back)
-    for item in order["items"]:
-        found = False
-        for p in b2b_client._products:
-            for s in p.get("skus", []):
-                if s.get("id") == item["sku_id"]:
-                    s["available_quantity"] += item["quantity"]
-                    found = True
-                    break
-            if found:
-                break
-        if not found:
-            for p in b2b_client._products:
-                if p.get("id") == item["sku_id"]:
-                    p["active_quantity"] = p.get("active_quantity", 0) + item["quantity"]
-                    break
+    # Unreserve SKU in B2B (add stock back via B2B Client HTTP/Direct client call)
+    items_payload = [{"sku_id": str(item["sku_id"]), "quantity": item["quantity"]} for item in order["items"]]
+    b2b_headers = {"X-Service-Key": b2b_client.service_key}
+    
+    try:
+        unreserve_result = b2b_client.unreserve(items=items_payload, headers=b2b_headers)
+    except Exception as e:
+        print(f"B2B unreserve connection error, falling back to CANCEL_PENDING: {e}")
+        now_iso = datetime.datetime.utcnow().isoformat() + "Z"
+        order["status"] = "CANCEL_PENDING"
+        order["updated_at"] = now_iso
+        if "status_history" not in order:
+            order["status_history"] = []
+        reason_msg = reason_str if reason_str else "B2B service unavailable"
+        order["status_history"].append({"status": "CANCEL_PENDING", "changed_at": now_iso, "reason": reason_msg})
+        order["cancel_reason"] = reason_str
+        return order
+
+    if not unreserve_result.get("success", False):
+        print(f"B2B unreserve returned failure status, setting to CANCEL_PENDING: {unreserve_result}")
+        now_iso = datetime.datetime.utcnow().isoformat() + "Z"
+        order["status"] = "CANCEL_PENDING"
+        order["updated_at"] = now_iso
+        if "status_history" not in order:
+            order["status_history"] = []
+        reason_msg = reason_str if reason_str else "B2B unreserve failed"
+        order["status_history"].append({"status": "CANCEL_PENDING", "changed_at": now_iso, "reason": reason_msg})
+        order["cancel_reason"] = reason_str
+        return order
 
     now_iso = datetime.datetime.utcnow().isoformat() + "Z"
     order["status"] = "CANCELLED"
     order["updated_at"] = now_iso
     if "status_history" not in order:
-        order["status_history"] = []
+         order["status_history"] = []
     reason_msg = reason_str if reason_str else "Order cancelled by client"
     order["status_history"].append({"status": "CANCELLED", "changed_at": now_iso, "reason": reason_msg})
     order["cancel_reason"] = reason_str
@@ -2280,7 +2293,9 @@ def change_order_status(order_id: UUID, new_status: str) -> Dict[str, Any]:
         # Trigger fulfill to B2B
         items_payload = [{"sku_id": str(item["sku_id"]), "quantity": item["quantity"]} for item in order["items"]]
         try:
-            b2b_client.fulfill(str(order_id), items_payload, {"X-Service-Key": b2b_client.service_key})
+            res = b2b_client.fulfill(str(order_id), items_payload, {"X-Service-Key": b2b_client.service_key})
+            if not res.get("success", False):
+                raise Exception(f"B2B Fulfill returned failure: {res}")
         except Exception as e:
             PENDING_FULFILLS.append((order_id, items_payload))
             print(f"B2B Fulfill failed, enqueued to PENDING_FULFILLS: {e}")
@@ -2314,7 +2329,9 @@ def trigger_retry_pending_fulfills():
     still_pending = []
     for ord_id, items in PENDING_FULFILLS:
         try:
-            b2b_client.fulfill(str(ord_id), items, {"X-Service-Key": b2b_client.service_key})
+            res = b2b_client.fulfill(str(ord_id), items, {"X-Service-Key": b2b_client.service_key})
+            if not res.get("success", False):
+                raise Exception(f"B2B Fulfill returned failure: {res}")
         except Exception:
             still_pending.append((ord_id, items))
     PENDING_FULFILLS.clear()
@@ -2487,3 +2504,69 @@ def b2b_inventory_reserve(
     res_data = {"reserved": True, "idempotency_key": key_str}
     b2b_client.reserved_keys[key_str] = res_data
     return res_data
+
+
+@app.post("/api/v1/inventory/unreserve")
+def b2b_inventory_unreserve(
+    payload: B2BUnreserveRequest,
+    x_service_key: Optional[str] = Header(None, alias="X-Service-Key")
+):
+    # 1. Auth check
+    if not x_service_key or x_service_key != b2b_client.service_key:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "UNAUTHORIZED", "message": "Invalid service key"}
+        )
+
+    # 2. Simulate outage if needed
+    if b2b_client.simulate_outage:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": "B2B_UNAVAILABLE", "message": "B2B Service out"}
+        )
+
+    # 3. Unreserve SKU items (add stock back in-memory B2B state)
+    for item in payload.items:
+        found = False
+        for p in b2b_client._products:
+            for s in p.get("skus", []):
+                if s.get("id") == item.sku_id:
+                    s["available_quantity"] += item.quantity
+                    found = True
+                    break
+            if found:
+                break
+        if not found:
+            for p in b2b_client._products:
+                if p.get("id") == item.sku_id:
+                    p["active_quantity"] = p.get("active_quantity", 0) + item.quantity
+                    break
+
+    return {"unreserved": True}
+
+
+@app.post("/api/v1/inventory/fulfill")
+def b2b_inventory_fulfill(
+    payload: B2BFulfillRequest,
+    x_service_key: Optional[str] = Header(None, alias="X-Service-Key")
+):
+    # 1. Auth check
+    if not x_service_key or x_service_key != b2b_client.service_key:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "UNAUTHORIZED", "message": "Invalid service key"}
+        )
+
+    # 2. Simulate outage if needed
+    if b2b_client.simulate_outage:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": "B2B_UNAVAILABLE", "message": "B2B Service out"}
+        )
+
+    order_id_str = str(payload.order_id)
+    if order_id_str in b2b_client.fulfilled_orders:
+        return {"fulfilled": True}
+
+    b2b_client.fulfilled_orders.add(order_id_str)
+    return {"fulfilled": True}
