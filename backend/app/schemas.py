@@ -286,6 +286,10 @@ class B2BReserveRequest(BaseModel):
     items: List[B2BReserveItem]
 
 
+class B2BUnreserveRequest(BaseModel):
+    items: List[B2BReserveItem]
+
+
 class OrderItemRequest(BaseModel):
     sku_id: UUID
     quantity: int
