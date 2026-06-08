@@ -15,7 +15,7 @@ from app.schemas import (
     CartItemAddRequest, CartItemUpdateRequest, CartItemResponse, CartResponse, CartMergeRequest,
     BannerResponse, BannerEventRequest, Collection, CollectionDetailResponse,
     OrderItemRequest, OrderCreateRequest, OrderItemResponse, OrderResponse, PaginatedOrders,
-    OrderCancelRequest, OrderStatusUpdateRequest
+    OrderCancelRequest, OrderStatusUpdateRequest, B2BReserveRequest, AddressResponse
 )
 from app.b2b_client import B2BClient
 
@@ -1993,13 +1993,18 @@ def create_order(
             detail={"code": "INVALID_REQUEST", "message": "Idempotency-Key is required"}
         )
 
-    # 3. Check existing order
+    # 3. Check existing order (with IDOR assessment)
     for o in ORDERS_DB.values():
         if o.get("idempotency_key") == idempotency_key:
+            if o.get("buyer_id") != user_id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail={"code": "ACCESS_DENIED", "message": "Доступ запрещен"}
+                )
             return o
 
-    # 4. Resolve items
-    items = payload.items
+    # 4. Resolve items (B2C: support both items and items_snapshot)
+    items = payload.items or payload.items_snapshot
     if not items:
         # Fallback to fetching from Cart
         cart_id_str = str(user_id)
@@ -2029,70 +2034,31 @@ def create_order(
             detail={"code": "B2B_UNAVAILABLE", "message": "Сервис товаров временно недоступен, попробуйте позже"}
         )
 
-    # 6. Check B2B Availability
-    failed_items = []
-    for item in items:
-        sku_data, p = find_sku_and_product_in_b2b(b2b_client._products, item.sku_id)
-        if not sku_data:
-            failed_items.append({
-                "sku_id": str(item.sku_id),
-                "reason": "SKU_NOT_FOUND"
-            })
-        elif p.get("status") in ["BLOCKED", "HARD_BLOCKED"] or p.get("status") != "MODERATED":
-            failed_items.append({
-                "sku_id": str(item.sku_id),
-                "reason": "PRODUCT_BLOCKED"
-            })
-        elif p.get("deleted", False):
-            failed_items.append({
-                "sku_id": str(item.sku_id),
-                "reason": "PRODUCT_DELETED"
-            })
-        else:
-            avail = sku_data.get("available_quantity", 0)
-            if avail == 0:
-                failed_items.append({
-                    "sku_id": str(item.sku_id),
-                    "reason": "OUT_OF_STOCK",
-                    "requested": item.quantity,
-                    "available": 0
-                })
-            elif avail < item.quantity:
-                failed_items.append({
-                    "sku_id": str(item.sku_id),
-                    "reason": "INSUFFICIENT_STOCK",
-                    "requested": item.quantity,
-                    "available": avail
-                })
-
-    if failed_items:
+    # 6. Reserve SKU in B2B via HTTP POST Client
+    try:
+        b2b_headers = {"X-Service-Key": b2b_client.service_key}
+        if x_simulate_b2b_outage:
+            b2b_headers["X-Simulate-B2B-Outage"] = x_simulate_b2b_outage
+            
+        reserve_result = b2b_client.reserve(
+            idempotency_key=str(idempotency_key),
+            items=[{"sku_id": str(item.sku_id), "quantity": item.quantity} for item in items],
+            headers=b2b_headers
+        )
+    except Exception:
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "code": "RESERVE_FAILED",
-                "message": "Не удалось зарезервировать товары",
-                "failed_items": failed_items
-            }
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": "B2B_UNAVAILABLE", "message": "Сервис товаров временно недоступен, попробуйте позже"}
         )
 
-    # 7. Reserve SKU in B2B (decrease stock)
-    for item in items:
-        found = False
-        for p in b2b_client._products:
-            for s in p.get("skus", []):
-                if s.get("id") == item.sku_id:
-                    s["available_quantity"] -= item.quantity
-                    found = True
-                    break
-            if found:
-                break
-        if not found:
-            for p in b2b_client._products:
-                if p.get("id") == item.sku_id:
-                    p["active_quantity"] = max(0, p.get("active_quantity", 0) - item.quantity)
-                    break
+    if not reserve_result.get("success", False):
+        status_code = reserve_result.get("status_code", 409)
+        raise HTTPException(
+            status_code=status_code,
+            detail=reserve_result.get("detail", {"code": "RESERVE_FAILED", "message": "Не удалось зарезервировать товары"})
+        )
 
-    # 8. Create Order in DB
+    # 7. Create Order in DB
     order_id = uuid.uuid4()
     order_items = []
     total_amount = 0
@@ -2429,3 +2395,95 @@ async def handle_b2b_product_event(
             pass
 
     return {"accepted": True}
+
+
+@app.post("/api/v1/inventory/reserve")
+def b2b_inventory_reserve(
+    payload: B2BReserveRequest,
+    x_service_key: Optional[str] = Header(None, alias="X-Service-Key")
+):
+    # 1. Auth check
+    if not x_service_key or x_service_key != b2b_client.service_key:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "UNAUTHORIZED", "message": "Invalid service key"}
+        )
+
+    # 2. Idempotency Check
+    key_str = str(payload.idempotency_key)
+    if key_str in b2b_client.reserved_keys:
+        return b2b_client.reserved_keys[key_str]
+
+    # 3. Simulate outage if needed
+    if b2b_client.simulate_outage:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": "B2B_UNAVAILABLE", "message": "B2B Service out"}
+        )
+
+    # 4. Check stock availability for all items
+    failed_items = []
+    for item in payload.items:
+        sku_data, p = find_sku_and_product_in_b2b(b2b_client._products, item.sku_id)
+        if not sku_data:
+            failed_items.append({
+                "sku_id": str(item.sku_id),
+                "reason": "SKU_NOT_FOUND"
+            })
+        elif p.get("status") in ["BLOCKED", "HARD_BLOCKED"] or p.get("status") != "MODERATED":
+            failed_items.append({
+                "sku_id": str(item.sku_id),
+                "reason": "PRODUCT_BLOCKED"
+            })
+        elif p.get("deleted", False):
+            failed_items.append({
+                "sku_id": str(item.sku_id),
+                "reason": "PRODUCT_DELETED"
+            })
+        else:
+            avail = sku_data.get("available_quantity", 0)
+            if avail == 0:
+                failed_items.append({
+                    "sku_id": str(item.sku_id),
+                    "reason": "OUT_OF_STOCK",
+                    "requested": item.quantity,
+                    "available": 0
+                })
+            elif avail < item.quantity:
+                failed_items.append({
+                    "sku_id": str(item.sku_id),
+                    "reason": "INSUFFICIENT_STOCK",
+                    "requested": item.quantity,
+                    "available": avail
+                })
+
+    if failed_items:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "RESERVE_FAILED",
+                "message": "Не удалось зарезервировать товары",
+                "failed_items": failed_items
+            }
+        )
+
+    # 5. Decrement quantities inside B2B client (in-memory B2B state mutation)
+    for item in payload.items:
+        found = False
+        for p in b2b_client._products:
+            for s in p.get("skus", []):
+                if s.get("id") == item.sku_id:
+                    s["available_quantity"] -= item.quantity
+                    found = True
+                    break
+            if found:
+                break
+        if not found:
+            for p in b2b_client._products:
+                if p.get("id") == item.sku_id:
+                    p["active_quantity"] = max(0, p.get("active_quantity", 0) - item.quantity)
+                    break
+
+    res_data = {"reserved": True, "idempotency_key": key_str}
+    b2b_client.reserved_keys[key_str] = res_data
+    return res_data

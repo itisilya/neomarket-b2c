@@ -260,17 +260,44 @@ class CollectionDetailResponse(BaseModel):
     unavailable_ids: List[UUID]
 
 
+class AddressResponse(BaseModel):
+    id: UUID
+    country: str
+    region: Optional[str] = None
+    city: str
+    street: str
+    building: str
+    apartment: Optional[str] = None
+    postal_code: Optional[str] = None
+    recipient_name: Optional[str] = None
+    recipient_phone: Optional[str] = None
+    is_default: Optional[bool] = False
+    comment: Optional[str] = None
+    created_at: str
+
+
+class B2BReserveItem(BaseModel):
+    sku_id: UUID
+    quantity: int
+
+
+class B2BReserveRequest(BaseModel):
+    idempotency_key: UUID
+    items: List[B2BReserveItem]
+
+
 class OrderItemRequest(BaseModel):
     sku_id: UUID
     quantity: int
 
 
 class OrderCreateRequest(BaseModel):
-    address_id: Optional[UUID] = None
-    payment_method_id: Optional[UUID] = None
+    address_id: UUID
+    payment_method_id: UUID
     comment: Optional[str] = None
     idempotency_key: Optional[UUID] = None
     items: Optional[List[OrderItemRequest]] = None
+    items_snapshot: Optional[List[OrderItemRequest]] = None
     delivery_address: Optional[str] = None
 
 
@@ -301,7 +328,7 @@ class OrderResponse(BaseModel):
     total: int
     delivery_cost: int = 0
     delivery_address: Optional[str] = None
-    address: Optional[Dict[str, Any]] = None
+    address: AddressResponse
     comment: Optional[str] = None
     cancel_reason: Optional[str] = None
     created_at: str
