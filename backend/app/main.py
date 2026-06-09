@@ -2240,7 +2240,7 @@ def cancel_order(
     b2b_headers = {"X-Service-Key": b2b_client.service_key}
     
     try:
-        unreserve_result = b2b_client.unreserve(items=items_payload, headers=b2b_headers)
+        unreserve_result = b2b_client.unreserve(order_id=str(order_id), items=items_payload, headers=b2b_headers)
     except Exception as e:
         print(f"B2B unreserve connection error, falling back to CANCEL_PENDING: {e}")
         now_iso = datetime.datetime.utcnow().isoformat() + "Z"

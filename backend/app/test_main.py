@@ -1298,6 +1298,13 @@ def test_cancel_paid_order_transitions_to_cancelled():
         )
         assert cancel_response.status_code == 200
         mock_client.assert_called_once()
+        
+        # Verify order_id is present and matches in the unreserve B2B POST request body
+        mock_client_instance.post.assert_called_once()
+        call_kwargs = mock_client_instance.post.call_args[1]
+        assert "json" in call_kwargs
+        assert call_kwargs["json"]["order_id"] == order_id
+        assert len(call_kwargs["json"]["items"]) == 1
 
     data = cancel_response.json()
     assert data["status"] == "CANCELLED"
