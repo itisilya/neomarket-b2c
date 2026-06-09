@@ -539,7 +539,7 @@ class B2BClient:
                     }
                 raise inner_e
 
-    def unreserve(self, items: List[Dict[str, Any]], headers: Dict[str, str]) -> Dict[str, Any]:
+    def unreserve(self, order_id: str, items: List[Dict[str, Any]], headers: Dict[str, str]) -> Dict[str, Any]:
         """
         US-ORD-03: Real B2B inventory unreservation over HTTP POST.
         We instantiate httpx.Client with the FastAPI ASGI application to perform
@@ -554,6 +554,7 @@ class B2BClient:
         from app.main import app  # lazy import to avoid circular dependency
         
         payload = {
+            "order_id": order_id,
             "items": items
         }
         try:
@@ -596,6 +597,7 @@ class B2BClient:
                 from app.schemas import B2BUnreserveRequest, B2BReserveItem
                 
                 req = B2BUnreserveRequest(
+                    order_id=UUID(order_id),
                     items=[B2BReserveItem(sku_id=it["sku_id"], quantity=it["quantity"]) for it in items]
                 )
                 

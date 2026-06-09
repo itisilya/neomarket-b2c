@@ -287,6 +287,7 @@ class B2BReserveRequest(BaseModel):
 
 
 class B2BUnreserveRequest(BaseModel):
+    order_id: UUID
     items: List[B2BReserveItem]
 
 
