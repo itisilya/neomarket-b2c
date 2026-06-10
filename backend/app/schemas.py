@@ -302,9 +302,9 @@ class OrderItemRequest(BaseModel):
 
 
 class OrderCreateRequest(BaseModel):
-    address_id: Optional[UUID] = None
-    payment_method_id: Optional[UUID] = None
-    comment: Optional[str] = None
+    address_id: UUID
+    payment_method_id: UUID
+    comment: Optional[str] = Field(None, max_length=1000)
     idempotency_key: Optional[UUID] = None
     items: Optional[List[OrderItemRequest]] = None
     items_snapshot: Optional[List[OrderItemRequest]] = None

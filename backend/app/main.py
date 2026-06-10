@@ -891,6 +891,7 @@ COLLECTIONS_DB: Dict[UUID, Dict[str, Any]] = {
 # Key: order_id (UUID), Value: Dict of order details
 ORDERS_DB: Dict[UUID, Dict[str, Any]] = {}
 PENDING_FULFILLS: List[tuple] = []
+PENDING_CANCELS: List[tuple] = []
 
 
 def decode_jwt(token: str) -> dict:
@@ -1701,6 +1702,74 @@ def delete_cart_item(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+@app.delete("/api/v1/cart", status_code=status.HTTP_204_NO_CONTENT)
+@app.delete("/cart", status_code=status.HTTP_204_NO_CONTENT)
+def clear_cart(
+    authorization: Optional[str] = Header(None),
+    x_session_id: Optional[str] = Header(None, alias="X-Session-Id"),
+    session_id: Optional[str] = Query(None)
+):
+    owner_id = get_cart_owner_id(authorization, x_session_id, session_id)
+    if owner_id in CART_DB:
+        CART_DB[owner_id] = {}
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.post("/api/v1/cart/validate")
+@app.post("/cart/validate")
+def validate_cart_endpoint(
+    authorization: Optional[str] = Header(None),
+    x_session_id: Optional[str] = Header(None, alias="X-Session-Id"),
+    session_id: Optional[str] = Query(None)
+):
+    owner_id = get_cart_owner_id(authorization, x_session_id, session_id)
+    cart_data = _build_cart_response(owner_id)
+    
+    issues = []
+    for item in cart_data["items"]:
+        sku_id = item["sku_id"]
+        qty = item["quantity"]
+        avail = item["available_quantity"] or 0
+        reason = item["unavailable_reason"] or ""
+        
+        if not item["is_available"]:
+            if "DELETED" in reason:
+                issues.append({
+                    "sku_id": str(sku_id),
+                    "type": "PRODUCT_DELETED",
+                    "message": f"Товар {item['name']} был удален."
+                })
+            elif "BLOCKED" in reason or "UNPUBLISHED" in reason:
+                issues.append({
+                    "sku_id": str(sku_id),
+                    "type": "PRODUCT_BLOCKED",
+                    "message": f"Товар {item['name']} заблокирован."
+                })
+            else:
+                issues.append({
+                    "sku_id": str(sku_id),
+                    "type": "OUT_OF_STOCK",
+                    "message": f"Товар {item['name']} отсутствует на складе."
+                })
+        elif qty > avail:
+            issues.append({
+                "sku_id": str(sku_id),
+                "type": "QUANTITY_REDUCED",
+                "message": f"Доступное количество товара уменьшено до {avail} шт.",
+                "old_value": qty,
+                "new_value": avail
+            })
+            
+    is_valid = len(issues) == 0
+    cart_data["is_valid"] = is_valid
+    
+    return {
+        "is_valid": is_valid,
+        "cart": cart_data,
+        "issues": issues
+    }
+
+
 @app.post("/api/v1/cart/merge", response_model=CartResponse)
 @app.post("/cart/merge", response_model=CartResponse)
 def merge_cart(
@@ -2210,8 +2279,8 @@ def cancel_order(
             detail={"code": "ORDER_NOT_FOUND", "message": "Заказ не найден"}
         )
 
-    # Status validation: cancel allowed only in CREATED or PAID
-    if order.get("status") not in ["CREATED", "PAID"]:
+    # Status validation: cancel allowed only in CREATED, PAID, or ASSEMBLING
+    if order.get("status") not in ["CREATED", "PAID", "ASSEMBLING"]:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={
@@ -2224,6 +2293,7 @@ def cancel_order(
     reason_str = payload.reason if (payload and payload.reason) else None
 
     # If B2B is unavailable, transition to CANCEL_PENDING
+    items_payload = [{"sku_id": str(item["sku_id"]), "quantity": item["quantity"]} for item in order["items"]]
     if x_simulate_b2b_outage == "true" or b2b_client.simulate_outage:
         now_iso = datetime.datetime.utcnow().isoformat() + "Z"
         order["status"] = "CANCEL_PENDING"
@@ -2233,10 +2303,10 @@ def cancel_order(
         reason_msg = reason_str if reason_str else "B2B service unavailable"
         order["status_history"].append({"status": "CANCEL_PENDING", "changed_at": now_iso, "reason": reason_msg})
         order["cancel_reason"] = reason_str
+        PENDING_CANCELS.append((order_id, items_payload, reason_str))
         return order
 
     # Unreserve SKU in B2B (add stock back via B2B Client HTTP/Direct client call)
-    items_payload = [{"sku_id": str(item["sku_id"]), "quantity": item["quantity"]} for item in order["items"]]
     b2b_headers = {"X-Service-Key": b2b_client.service_key}
     
     try:
@@ -2251,6 +2321,7 @@ def cancel_order(
         reason_msg = reason_str if reason_str else "B2B service unavailable"
         order["status_history"].append({"status": "CANCEL_PENDING", "changed_at": now_iso, "reason": reason_msg})
         order["cancel_reason"] = reason_str
+        PENDING_CANCELS.append((order_id, items_payload, reason_str))
         return order
 
     if not unreserve_result.get("success", False):
@@ -2263,6 +2334,7 @@ def cancel_order(
         reason_msg = reason_str if reason_str else "B2B unreserve failed"
         order["status_history"].append({"status": "CANCEL_PENDING", "changed_at": now_iso, "reason": reason_msg})
         order["cancel_reason"] = reason_str
+        PENDING_CANCELS.append((order_id, items_payload, reason_str))
         return order
 
     now_iso = datetime.datetime.utcnow().isoformat() + "Z"
@@ -2337,6 +2409,65 @@ def trigger_retry_pending_fulfills():
     PENDING_FULFILLS.clear()
     PENDING_FULFILLS.extend(still_pending)
     return {"pending_count": len(PENDING_FULFILLS)}
+
+
+@app.post("/api/v1/orders/retry-cancels")
+@app.post("/orders/retry-cancels")
+def trigger_retry_pending_cancels():
+    import datetime
+    still_pending = []
+    b2b_headers = {"X-Service-Key": b2b_client.service_key}
+    for ord_id, items, reason_str in PENDING_CANCELS:
+        try:
+            if b2b_client.simulate_outage:
+                raise Exception("Outage simulated")
+            res = b2b_client.unreserve(order_id=str(ord_id), items=items, headers=b2b_headers)
+            if not res.get("success", False):
+                raise Exception(f"B2B unreserve returned failure status: {res}")
+            
+            # Transition order to CANCELLED
+            if ord_id in ORDERS_DB:
+                order = ORDERS_DB[ord_id]
+                now_iso = datetime.datetime.utcnow().isoformat() + "Z"
+                order["status"] = "CANCELLED"
+                order["updated_at"] = now_iso
+                if "status_history" not in order:
+                    order["status_history"] = []
+                reason_msg = reason_str if reason_str else "Order cancelled (retry succeeded)"
+                order["status_history"].append({"status": "CANCELLED", "changed_at": now_iso, "reason": reason_msg})
+                order["cancel_reason"] = reason_str
+                
+        except Exception as e:
+            print(f"[Retry Cancel Failure] Order {ord_id} retry failed: {e}")
+            still_pending.append((ord_id, items, reason_str))
+            
+    PENDING_CANCELS.clear()
+    PENDING_CANCELS.extend(still_pending)
+    return {"pending_count": len(PENDING_CANCELS)}
+
+
+# Background periodic retry job to process pending fulfillments and cancellations
+def background_periodic_retry_runner():
+    import time
+    print("[Background Periodic Retry Job] Started.", flush=True)
+    while True:
+        try:
+            time.sleep(30)  # Check and retry every 30 seconds
+            if PENDING_FULFILLS:
+                print(f"[Background Periodic Retry] Retrying {len(PENDING_FULFILLS)} pending fulfills...", flush=True)
+                trigger_retry_pending_fulfills()
+            if PENDING_CANCELS:
+                print(f"[Background Periodic Retry] Retrying {len(PENDING_CANCELS)} pending cancels...", flush=True)
+                trigger_retry_pending_cancels()
+        except Exception as err:
+            print(f"[Background Periodic Retry Job Error] {err}", flush=True)
+
+import threading
+try:
+    threading.Thread(target=background_periodic_retry_runner, daemon=True).start()
+    print("[Background Periodic Retry Job] Daemon thread spawned.", flush=True)
+except Exception as e:
+    print(f"[Background Periodic Retry Job Spawning Error] {e}", flush=True)
 
 
 @app.post("/api/v1/events/product")
