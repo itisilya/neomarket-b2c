@@ -626,6 +626,16 @@ export default function App() {
       });
 
       if (res.ok) {
+        // Clear cart in backend database
+        try {
+          await fetch("/api/v1/cart", {
+            method: "DELETE",
+            headers
+          });
+        } catch (clearErr) {
+          console.error("Failed to clear backend cart:", clearErr);
+        }
+
         setCart({ items: [], total_amount: 0 });
         setIsCheckoutModalOpen(false);
         setIsCartOpen(false);

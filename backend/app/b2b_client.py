@@ -422,12 +422,13 @@ class B2BClient:
         }
         
         try:
-            response = httpx.post(
-                f"{base_url}/api/v1/inventory/fulfill",
-                json=payload,
-                headers={"X-Service-Key": service_key},
-                timeout=10.0
-            )
+            with httpx.Client(trust_env=False) as client:
+                response = client.post(
+                    f"{base_url}/api/v1/inventory/fulfill",
+                    json=payload,
+                    headers={"X-Service-Key": service_key},
+                    timeout=10.0
+                )
             
             if response.status_code == 503:
                 return {
@@ -475,7 +476,7 @@ class B2BClient:
             "items": items
         }
         try:
-            with httpx.Client(app=app, base_url="http://b2b-internal", timeout=10.0) as client:
+            with httpx.Client(app=app, base_url="http://b2b-internal", timeout=10.0, trust_env=False) as client:
                 response = client.post(
                     "/api/v1/inventory/reserve",
                     json=payload,
@@ -558,7 +559,7 @@ class B2BClient:
             "items": items
         }
         try:
-            with httpx.Client(app=app, base_url="http://b2b-internal", timeout=10.0) as client:
+            with httpx.Client(app=app, base_url="http://b2b-internal", timeout=10.0, trust_env=False) as client:
                 response = client.post(
                     "/api/v1/inventory/unreserve",
                     json=payload,
@@ -591,31 +592,12 @@ class B2BClient:
                 "data": response.json()
             }
         except Exception as e:
-            # Fall back to direct invocation of the FastAPI router function
-            try:
-                from app.main import b2b_inventory_unreserve
-                from app.schemas import B2BUnreserveRequest, B2BReserveItem
-                
-                req = B2BUnreserveRequest(
-                    order_id=UUID(order_id),
-                    items=[B2BReserveItem(sku_id=it["sku_id"], quantity=it["quantity"]) for it in items]
-                )
-                
-                res = b2b_inventory_unreserve(
-                    payload=req,
-                    x_service_key=headers.get("X-Service-Key")
-                )
-                return {
-                    "success": True,
-                    "status_code": 200,
-                    "data": res
+            print(f"[B2B Unreserve Fallback] Real HTTP unreserve connection failure: {e}. Placing order into CANCEL_PENDING.")
+            return {
+                "success": False,
+                "status_code": 503,
+                "detail": {
+                    "code": "B2B_UNAVAILABLE",
+                    "message": f"B2B service unreserve call failed: {str(e)}"
                 }
-            except Exception as inner_e:
-                from fastapi import HTTPException
-                if isinstance(inner_e, HTTPException):
-                    return {
-                        "success": False,
-                        "status_code": inner_e.status_code,
-                        "detail": inner_e.detail
-                    }
-                raise inner_e
+            }

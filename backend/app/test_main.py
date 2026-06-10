@@ -654,6 +654,27 @@ def test_add_sku_increments_quantity_if_already_in_cart():
     assert data2["items"][0]["quantity"] == 4
 
 
+def test_clear_cart_empties_everything():
+    """
+    happy: test_clear_cart_empties_everything
+    - Очистка всей корзины -> 204 NO_CONTENT, CART_DB владельца очищается
+    """
+    from app.main import CART_DB
+    session_id = "test-guest-session-clear-99"
+    sku_id = "00000000-0000-0000-0000-000000000001"
+    
+    # Prepopulate
+    CART_DB[session_id] = {sku_id: 5}
+    
+    # Call clear API
+    response = client.delete(
+        "/api/v1/cart",
+        headers={"X-Session-Id": session_id}
+    )
+    assert response.status_code == 204
+    assert CART_DB.get(session_id) == {}
+
+
 def test_get_cart_enriched_with_b2b_data():
     """
     happy: get_cart_enriched_with_b2b_data
@@ -685,6 +706,41 @@ def test_get_cart_enriched_with_b2b_data():
     assert item["product"]["name"] == "Crypto Whale Alerts 🐳"
     assert item["subtotal"] == 30000000
     assert data["total_amount"] == 30000000
+
+
+def test_validate_cart_endpoint():
+    """
+    happy: validate_cart_endpoint
+    - Валидная корзина возвращает is_valid: True, пустые issues.
+    - Корзина с out_of_stock SKU возвращает is_valid: False, с issues.
+    """
+    from app.main import CART_DB
+    session_id = "test-guest-session-validate-1"
+    sku_id_valid = "00000000-0000-0000-0000-000000000001"
+    sku_id_invalid = "770e8400-e29b-41d4-a716-446655440097"
+    
+    # 1. Valid cart case
+    CART_DB[session_id] = {sku_id_valid: 1}
+    response = client.post(
+        "/api/v1/cart/validate",
+        headers={"X-Session-Id": session_id}
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["is_valid"] is True
+    assert len(data["issues"]) == 0
+    
+    # 2. Invalid (out of stock) cart case
+    CART_DB[session_id] = {sku_id_invalid: 1, sku_id_valid: 1}
+    response = client.post(
+        "/api/v1/cart/validate",
+        headers={"X-Session-Id": session_id}
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["is_valid"] is False
+    assert len(data["issues"]) >= 1
+    assert data["issues"][0]["type"] == "OUT_OF_STOCK"
 
 
 def test_unavailable_sku_shown_with_reason():
@@ -1357,10 +1413,10 @@ def test_unreserve_failure_transitions_to_cancel_pending():
     assert any(h["status"] == "CANCEL_PENDING" for h in data["status_history"])
 
 
-def test_cancel_assembling_order_returns_409():
+def test_cancel_assembling_order_is_allowed():
     """
-    unhappy: cancel_assembling_order_returns_409
-    - заказ в ASSEMBLING -> 409 CANCEL_NOT_ALLOWED с текущим статусом
+    happy: test_cancel_assembling_order_is_allowed
+    - заказ в ASSEMBLING теперь разрешено отменять
     """
     from app.main import ORDERS_DB
     from uuid import UUID
@@ -1388,6 +1444,60 @@ def test_cancel_assembling_order_returns_409():
     assert order_id in ORDERS_DB
     ORDERS_DB[order_id]["status"] = "ASSEMBLING"
     
+    # Cancel order with mock unreserve -> 200 CANCELLED
+    from unittest.mock import patch, MagicMock
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {"unreserved": True}
+
+    mock_client_instance = MagicMock()
+    mock_client_instance.__enter__.return_value = mock_client_instance
+    mock_client_instance.post.return_value = mock_response
+
+    with patch("httpx.Client", return_value=mock_client_instance) as mock_client:
+        cancel_response = client.post(
+            f"/api/v1/orders/{order_id}/cancel",
+            headers={"Authorization": token}
+        )
+        assert cancel_response.status_code == 200
+        mock_client.assert_called_once()
+
+    data = cancel_response.json()
+    assert data["status"] == "CANCELLED"
+    assert any(h["status"] == "CANCELLED" for h in data["status_history"])
+
+
+def test_cancel_delivered_order_returns_409():
+    """
+    unhappy: test_cancel_delivered_order_returns_409
+    - заказ в DELIVERED -> 409 CANCEL_NOT_ALLOWED с текущим статусом
+    """
+    from app.main import ORDERS_DB
+    from uuid import UUID
+    user_id = "a1111111-e29b-41d4-a716-446655449907"
+    token = create_mock_jwt(user_id)
+    sku_id = "00000000-0000-0000-0000-000000000001"
+    idempotency_key = "70500000-1111-2222-3333-444444444441"
+    
+    # Place order
+    response = client.post(
+        "/api/v1/orders",
+        json={
+            "idempotency_key": idempotency_key,
+            "items": [{"sku_id": sku_id, "quantity": 1}],
+            "address_id": "e2020000-e29b-41d4-a716-446655440001",
+            "payment_method_id": "e3030000-e29b-41d4-a716-446655440001"
+        },
+        headers={"Authorization": token, "Idempotency-Key": idempotency_key}
+    )
+    assert response.status_code == 201
+    order_id_raw = response.json()["id"]
+    order_id = UUID(order_id_raw)
+    
+    # Change status to DELIVERED
+    assert order_id in ORDERS_DB
+    ORDERS_DB[order_id]["status"] = "DELIVERED"
+    
     # Cancel order -> 409
     cancel_response = client.post(
         f"/api/v1/orders/{order_id}/cancel",
@@ -1396,7 +1506,7 @@ def test_cancel_assembling_order_returns_409():
     assert cancel_response.status_code == 409
     data = cancel_response.json()
     assert data["code"] == "CANCEL_NOT_ALLOWED"
-    assert data["current_status"] == "ASSEMBLING"
+    assert data["current_status"] == "DELIVERED"
 
 
 def test_other_user_order_returns_404():
@@ -1736,3 +1846,67 @@ def test_repeated_fulfill_idempotent():
         assert res2.get("success") is True
         
         assert route.call_count == 2
+
+
+def test_cancel_failure_retried_asynchronously():
+    from app.main import b2b_client, PENDING_CANCELS, ORDERS_DB
+    from uuid import UUID
+    from unittest.mock import patch, MagicMock
+    b2b_client.simulate_outage = False
+    PENDING_CANCELS.clear()
+    
+    sku_id = "00000000-0000-0000-0000-000000000001"
+    user_id = "a1111111-e29b-41d4-a716-446655449999"
+    token = create_mock_jwt(user_id)
+    idempotency_key = "40000000-abcd-ef01-2345-6789abcdef04"
+    
+    # Place order
+    response = client.post(
+        "/api/v1/orders",
+        json={
+            "idempotency_key": idempotency_key,
+            "items": [{"sku_id": sku_id, "quantity": 1}],
+            "address_id": "e2020000-e29b-41d4-a716-446655440001",
+            "payment_method_id": "e3030000-e29b-41d4-a716-446655440001"
+        },
+        headers={"Authorization": token, "Idempotency-Key": idempotency_key}
+    )
+    assert response.status_code == 201
+    order_id_raw = response.json()["id"]
+    order_id = UUID(order_id_raw)
+    
+    # Cancel order while B2B has outage with mocked 503 HTTP
+    mock_response = MagicMock()
+    mock_response.status_code = 503
+    mock_response.json.return_value = {"detail": "B2B offline"}
+
+    mock_client_instance = MagicMock()
+    mock_client_instance.__enter__.return_value = mock_client_instance
+    mock_client_instance.post.return_value = mock_response
+
+    with patch("httpx.Client", return_value=mock_client_instance) as mock_client:
+        cancel_response = client.post(
+            f"/api/v1/orders/{order_id}/cancel",
+            headers={"Authorization": token}
+        )
+        assert cancel_response.status_code == 200
+        assert cancel_response.json()["status"] == "CANCEL_PENDING"
+            
+    # Verify it is recorded in PENDING_CANCELS queue
+    assert any(str(p_ord_id) == str(order_id) for p_ord_id, items, reason in PENDING_CANCELS)
+    
+    # Restore B2B and trigger retry with mocked successful HTTP
+    mock_response_ok = MagicMock()
+    mock_response_ok.status_code = 200
+    mock_response_ok.json.return_value = {"unreserved": True}
+
+    mock_client_instance_ok = MagicMock()
+    mock_client_instance_ok.__enter__.return_value = mock_client_instance_ok
+    mock_client_instance_ok.post.return_value = mock_response_ok
+
+    with patch("httpx.Client", return_value=mock_client_instance_ok) as mock_client:
+        retry_response = client.post("/api/v1/orders/retry-cancels")
+        assert retry_response.status_code == 200
+        assert retry_response.json()["pending_count"] == 0
+        
+    assert ORDERS_DB[order_id]["status"] == "CANCELLED"
