@@ -1467,6 +1467,60 @@ def test_cancel_assembling_order_is_allowed():
     assert any(h["status"] == "CANCELLED" for h in data["status_history"])
 
 
+def test_cancel_delivering_order_is_allowed():
+    """
+    happy: test_cancel_delivering_order_is_allowed
+    - заказ в DELIVERING теперь разрешено отменять
+    """
+    from app.main import ORDERS_DB
+    from uuid import UUID
+    user_id = "a1111111-e29b-41d4-a716-446655449907"
+    token = create_mock_jwt(user_id)
+    sku_id = "00000000-0000-0000-0000-000000000001"
+    idempotency_key = "70000000-1111-2222-3333-444444444442"
+    
+    # Place order
+    response = client.post(
+        "/api/v1/orders",
+        json={
+            "idempotency_key": idempotency_key,
+            "items": [{"sku_id": sku_id, "quantity": 1}],
+            "address_id": "e2020000-e29b-41d4-a716-446655440001",
+            "payment_method_id": "e3030000-e29b-41d4-a716-446655440001"
+        },
+        headers={"Authorization": token, "Idempotency-Key": idempotency_key}
+    )
+    assert response.status_code == 201
+    order_id_raw = response.json()["id"]
+    order_id = UUID(order_id_raw)
+    
+    # Change status to DELIVERING
+    assert order_id in ORDERS_DB
+    ORDERS_DB[order_id]["status"] = "DELIVERING"
+    
+    # Cancel order with mock unreserve -> 200 CANCELLED
+    from unittest.mock import patch, MagicMock
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {"unreserved": True}
+
+    mock_client_instance = MagicMock()
+    mock_client_instance.__enter__.return_value = mock_client_instance
+    mock_client_instance.post.return_value = mock_response
+
+    with patch("httpx.Client", return_value=mock_client_instance) as mock_client:
+        cancel_response = client.post(
+            f"/api/v1/orders/{order_id}/cancel",
+            headers={"Authorization": token}
+        )
+        assert cancel_response.status_code == 200
+        mock_client.assert_called_once()
+
+    data = cancel_response.json()
+    assert data["status"] == "CANCELLED"
+    assert any(h["status"] == "CANCELLED" for h in data["status_history"])
+
+
 def test_cancel_delivered_order_returns_409():
     """
     unhappy: test_cancel_delivered_order_returns_409

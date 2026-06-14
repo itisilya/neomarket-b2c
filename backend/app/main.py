@@ -2279,8 +2279,8 @@ def cancel_order(
             detail={"code": "ORDER_NOT_FOUND", "message": "Заказ не найден"}
         )
 
-    # Status validation: cancel allowed only in CREATED, PAID, or ASSEMBLING
-    if order.get("status") not in ["CREATED", "PAID", "ASSEMBLING"]:
+    # Status validation: cancel allowed in CREATED, PAID, ASSEMBLING, or DELIVERING
+    if order.get("status") not in ["CREATED", "PAID", "ASSEMBLING", "DELIVERING"]:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={
@@ -2490,11 +2490,14 @@ async def handle_b2b_product_event(
             detail={"code": "INVALID_REQUEST", "message": "Invalid JSON body"}
         )
 
+    is_b2b_events = "/b2b/events" in request.url.path
+    status_code = 202 if is_b2b_events else 200
+
     idempotency_key = body.get("idempotency_key")
     if idempotency_key:
         id_str = str(idempotency_key)
         if id_str in PROCESSED_B2B_EVENTS_KEYS:
-            return {"accepted": True}
+            return JSONResponse(status_code=status_code, content={"accepted": True})
         PROCESSED_B2B_EVENTS_KEYS.add(id_str)
 
     event_type = body.get("event") or body.get("event_type")
@@ -2542,7 +2545,7 @@ async def handle_b2b_product_event(
         except Exception:
             pass
 
-    return {"accepted": True}
+    return JSONResponse(status_code=status_code, content={"accepted": True})
 
 
 @app.post("/api/v1/inventory/reserve")
